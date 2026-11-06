@@ -1,45 +1,76 @@
-# Python
+# Python virtual environments
 .venv/
+venv/
+env/
+ENV/
+
+# Python cache and compiled files
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
 *.pyd
+
+# Testing and coverage
 .pytest_cache/
 .ruff_cache/
 .coverage
+.coverage.*
 htmlcov/
+.mypy_cache/
 
-# Environment variables / secrets
+# Environment variables and secrets
 .env
 .env.*
 !.env.example
 
-# Credentials
-keys/
+# Credentials and private keys
 credentials/
 secrets/
+keys/
+*.pem
+*.key
+*.crt
+*.p12
+*.json
 
 # Logs
 logs/
 *.log
 
-# Data
+# Generated local data
 data/raw/
 data/processed/
 data/tmp/
 
-# Airflow
+# Airflow local files
 airflow.db
 airflow.cfg
+airflow-webserver.pid
+airflow-scheduler.pid
 
-# MLflow
-mlruns/
-mlartifacts/
+# dbt generated files
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+dbt/.user.yml
 
-# IDE
+# Snowflake/dbt local artifacts
+*.sqlite
+*.db
+
+# Docker local overrides
+docker-compose.override.yml
+
+# VS Code
 .vscode/
-.idea/
+!.vscode/extensions.json
 
-# OS
+# Operating system files
 .DS_Store
 Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*~
