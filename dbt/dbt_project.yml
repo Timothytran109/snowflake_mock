@@ -1,0 +1,37 @@
+name: customer360_dbt
+version: "1.0.0"
+config-version: 2
+
+profile: customer360
+
+model-paths:
+  - models
+
+test-paths:
+  - tests
+
+macro-paths:
+  - macros
+
+seed-paths:
+  - seeds
+
+snapshot-paths:
+  - snapshots
+
+target-path: target
+
+clean-targets:
+  - target
+  - dbt_packages
+
+models:
+  customer360_dbt:
+    staging:
+      +materialized: view
+
+    intermediate:
+      +materialized: table
+
+    marts:
+      +materialized: table
