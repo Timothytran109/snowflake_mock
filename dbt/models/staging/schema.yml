@@ -1,0 +1,32 @@
+version: 2
+
+models:
+  - name: stg_stripe__payments
+    description: Cleaned and deduplicated Stripe payment records.
+
+    columns:
+      - name: payment_id
+        tests:
+          - not_null
+          - unique
+
+      - name: customer_id
+        tests:
+          - not_null
+
+      - name: amount
+        tests:
+          - not_null
+
+      - name: currency
+        tests:
+          - not_null
+
+      - name: status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - succeeded
+                  - failed
