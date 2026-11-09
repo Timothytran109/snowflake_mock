@@ -2,9 +2,30 @@ version: 2
 
 sources:
   - name: raw
+    description: >-
+      Source-aligned Fivetran mock exports in the development database. All seven
+      tables have _line and _fivetran_synced; none has _fivetran_deleted.
     database: CUSTOMER360_TEST
     schema: RAW
 
     tables:
       - name: mock_stripe_payments
         identifier: MOCK_STRIPE_PAYMENTS
+      - name: mock_stripe_customers
+        identifier: MOCK_STRIPE_CUSTOMERS
+        description: Stripe customer export; customer_id is the business key.
+      - name: mock_stripe_subscriptions
+        identifier: MOCK_STRIPE_SUBSCRIPTIONS
+        description: Stripe subscription export; subscription_id is the business key.
+      - name: mock_salesforce_accounts
+        identifier: MOCK_SALESFORCE_ACCOUNTS
+        description: Salesforce account export; account_id, not email, identifies accounts.
+      - name: mock_salesforce_opportunities
+        identifier: MOCK_SALESFORCE_OPPORTUNITIES
+        description: Salesforce opportunity export with text amounts and mixed date formats.
+      - name: mock_adobe_events
+        identifier: MOCK_ADOBE_EVENTS
+        description: Adobe event export; event_id identifies an individual event.
+      - name: mock_adobe_campaigns
+        identifier: MOCK_ADOBE_CAMPAIGNS
+        description: Adobe campaign export; campaign_id is the business key.

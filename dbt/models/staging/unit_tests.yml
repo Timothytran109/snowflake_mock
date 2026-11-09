@@ -1,0 +1,368 @@
+# Synthetic fixtures exercise transformations independently of current RAW contents.
+version: 2
+unit_tests:
+- name: stripe_customers_clean_dates_and_choose_latest
+  model: stg_stripe__customers
+  given:
+  - input: source('raw', 'mock_stripe_customers')
+    rows:
+    - _line: 1
+      _fivetran_synced: '2026-02-28 00:00:00 +00:00'
+      customer_id: ' cus_1 '
+      email: ' OLD@EXAMPLE.COM '
+      created_at: '2026-01-06'
+    - _line: 2
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      customer_id: cus_1
+      email: loser@example.com
+      created_at: 01/09/2026
+    - _line: 3
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      customer_id: cus_1
+      email: ' Alice@Example.COM '
+      created_at: 01/09/2026
+    - _line: 4
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      customer_id: cus_2
+      email: ' '
+      created_at: 2026/01/21
+    - _line: 5
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      customer_id: cus_3
+      email: null
+      created_at: '2026-02-02'
+  expect:
+    rows:
+    - customer_id: cus_1
+      email: alice@example.com
+      created_at: '2026-01-09 00:00:00'
+      _line: 3
+    - customer_id: cus_2
+      email: null
+      created_at: '2026-01-21 00:00:00'
+      _line: 4
+    - customer_id: cus_3
+      email: null
+      created_at: '2026-02-02 00:00:00'
+      _line: 5
+- name: stripe_subscriptions_normalize_and_preserve_open_ends
+  model: stg_stripe__subscriptions
+  given:
+  - input: source('raw', 'mock_stripe_subscriptions')
+    rows:
+    - _line: 1
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      subscription_id: ' sub_1 '
+      customer_id: ' cus_1 '
+      plan: ' Pro '
+      status: ' ACTIVE '
+      start_date: 01/10/2026
+      end_date: null
+    - _line: 2
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      subscription_id: sub_2
+      customer_id: cus_2
+      plan: Basic
+      status: canceled
+      start_date: 2026/01/22
+      end_date: '2026-02-20'
+    - _line: 3
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      subscription_id: sub_2
+      customer_id: cus_2
+      plan: ' Enterprise '
+      status: ' PAST_DUE '
+      start_date: 2026/01/22
+      end_date: '2026-02-20'
+    - _line: 4
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      subscription_id: sub_3
+      customer_id: cus_3
+      plan: Basic
+      status: trialing
+      start_date: '2026-02-03'
+      end_date: null
+  expect:
+    rows:
+    - subscription_id: sub_1
+      customer_id: cus_1
+      plan: pro
+      status: active
+      start_date: '2026-01-10'
+      end_date: null
+      _line: 1
+    - subscription_id: sub_2
+      customer_id: cus_2
+      plan: enterprise
+      status: past_due
+      start_date: '2026-01-22'
+      end_date: '2026-02-20'
+      _line: 3
+    - subscription_id: sub_3
+      customer_id: cus_3
+      plan: basic
+      status: trialing
+      start_date: '2026-02-03'
+      end_date: null
+      _line: 4
+- name: salesforce_accounts_keep_shared_emails_and_latest_update
+  model: stg_salesforce__accounts
+  given:
+  - input: source('raw', 'mock_salesforce_accounts')
+    rows:
+    - _line: 1
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      account_id: ' acct_1 '
+      email: ' Shared@Example.COM '
+      company_name: ' Alpha '
+      industry: ' Tech '
+      created_at: '2026-01-05'
+      updated_at: '2026-02-20 09:30:00.123'
+    - _line: 2
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      account_id: acct_2
+      email: shared@example.com
+      company_name: ' Beta '
+      industry: ' Finance '
+      created_at: 2026/01/12
+      updated_at: '2026-02-18 14:05:00'
+    - _line: 3
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      account_id: acct_1
+      email: stale@example.com
+      company_name: Stale
+      industry: Tech
+      created_at: '2026-01-05'
+      updated_at: '2026-02-19 00:00:00'
+  expect:
+    rows:
+    - account_id: acct_1
+      email: shared@example.com
+      company_name: Alpha
+      industry: Tech
+      created_at: '2026-01-05 00:00:00'
+      updated_at: '2026-02-20 09:30:00.123'
+      _line: 1
+    - account_id: acct_2
+      email: shared@example.com
+      company_name: Beta
+      industry: Finance
+      created_at: '2026-01-12 00:00:00'
+      updated_at: '2026-02-18 14:05:00'
+      _line: 2
+- name: salesforce_opportunities_keep_equal_amounts_and_parse_currency
+  model: stg_salesforce__opportunities
+  given:
+  - input: source('raw', 'mock_salesforce_opportunities')
+    rows:
+    - _line: 1
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      opportunity_id: ' opp_1 '
+      account_id: ' acct_1 '
+      amount: ' $48,500 '
+      stage: ' Closed Won '
+      created_at: 01/15/2026
+      closed_at: 02/19/2026
+    - _line: 2
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      opportunity_id: opp_2
+      account_id: acct_1
+      amount: '48500.00'
+      stage: CLOSED LOST
+      created_at: 2026/01/18
+      closed_at: '2026-02-20'
+    - _line: 3
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      opportunity_id: opp_3
+      account_id: acct_2
+      amount: ' 91000 '
+      stage: Proposal
+      created_at: '2026-01-21'
+      closed_at: null
+    - _line: 4
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      opportunity_id: opp_4
+      account_id: acct_2
+      amount: '30000'
+      stage: Negotiation
+      created_at: '2026-02-04'
+      closed_at: ' '
+    - _line: 5
+      _fivetran_synced: '2026-02-28 00:00:00 +00:00'
+      opportunity_id: opp_1
+      account_id: acct_1
+      amount: '100'
+      stage: Proposal
+      created_at: '2026-01-15'
+      closed_at: null
+  expect:
+    rows:
+    - opportunity_id: opp_1
+      account_id: acct_1
+      amount: 48500
+      stage: closed_won
+      created_at: '2026-01-15 00:00:00'
+      closed_at: '2026-02-19 00:00:00'
+      _line: 1
+    - opportunity_id: opp_2
+      account_id: acct_1
+      amount: 48500
+      stage: closed_lost
+      created_at: '2026-01-18 00:00:00'
+      closed_at: '2026-02-20 00:00:00'
+      _line: 2
+    - opportunity_id: opp_3
+      account_id: acct_2
+      amount: 91000
+      stage: proposal
+      created_at: '2026-01-21 00:00:00'
+      closed_at: null
+      _line: 3
+    - opportunity_id: opp_4
+      account_id: acct_2
+      amount: 30000
+      stage: negotiation
+      created_at: '2026-02-04 00:00:00'
+      closed_at: null
+      _line: 4
+- name: adobe_events_normalize_types_and_mixed_timestamps
+  model: stg_adobe__events
+  given:
+  - input: source('raw', 'mock_adobe_events')
+    rows:
+    - _line: 1
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      event_id: ' evt_1 '
+      email: ' Alice@Example.COM '
+      event_type: ' Email Open '
+      device_type: ' MOBILE '
+      campaign_id: ' cmp_1 '
+      event_timestamp: 02/02/2026 09:10
+    - _line: 2
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      event_id: evt_2
+      email: b@example.com
+      event_type: page view
+      device_type: Desktop
+      campaign_id: cmp_1
+      event_timestamp: 2026/02/03 13:45:00
+    - _line: 3
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      event_id: evt_3
+      email: c@example.com
+      event_type: form_submit
+      device_type: tablet
+      campaign_id: cmp_2
+      event_timestamp: '2026-02-04 16:20:00'
+    - _line: 4
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      event_id: evt_4
+      email: d@example.com
+      event_type: CLICK
+      device_type: mobile
+      campaign_id: cmp_2
+      event_timestamp: '2026-02-07'
+    - _line: 5
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      event_id: evt_2
+      email: b@example.com
+      event_type: page_view
+      device_type: Desktop
+      campaign_id: cmp_1
+      event_timestamp: 2026/02/03 13:45:00
+  expect:
+    rows:
+    - event_id: evt_1
+      email: alice@example.com
+      event_type: email_open
+      device_type: mobile
+      campaign_id: cmp_1
+      event_timestamp: '2026-02-02 09:10:00'
+      _line: 1
+    - event_id: evt_2
+      email: b@example.com
+      event_type: page_view
+      device_type: desktop
+      campaign_id: cmp_1
+      event_timestamp: '2026-02-03 13:45:00'
+      _line: 5
+    - event_id: evt_3
+      email: c@example.com
+      event_type: form_submit
+      device_type: tablet
+      campaign_id: cmp_2
+      event_timestamp: '2026-02-04 16:20:00'
+      _line: 3
+    - event_id: evt_4
+      email: d@example.com
+      event_type: click
+      device_type: mobile
+      campaign_id: cmp_2
+      event_timestamp: '2026-02-07 00:00:00'
+      _line: 4
+- name: adobe_campaigns_clean_channels_dates_and_ties
+  model: stg_adobe__campaigns
+  given:
+  - input: source('raw', 'mock_adobe_campaigns')
+    rows:
+    - _line: 1
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      campaign_id: ' cmp_1 '
+      campaign_name: ' Email Launch '
+      channel: ' Email '
+      start_date: 02/01/2026
+      end_date: 03/15/2026
+    - _line: 2
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      campaign_id: cmp_2
+      campaign_name: ' Social '
+      channel: Paid Social
+      start_date: 2026/02/05
+      end_date: 2026/04/01
+    - _line: 3
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      campaign_id: cmp_3
+      campaign_name: ' Display '
+      channel: DISPLAY
+      start_date: '2026-02-10'
+      end_date: null
+    - _line: 4
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      campaign_id: cmp_2
+      campaign_name: ' Social Final '
+      channel: paid_social
+      start_date: 2026/02/05
+      end_date: 2026/04/01
+    - _line: 5
+      _fivetran_synced: '2026-03-01 00:00:00 +00:00'
+      campaign_id: cmp_4
+      campaign_name: ' Open '
+      channel: email
+      start_date: '2026-02-10'
+      end_date: ' '
+  expect:
+    rows:
+    - campaign_id: cmp_1
+      campaign_name: Email Launch
+      channel: email
+      start_date: '2026-02-01'
+      end_date: '2026-03-15'
+      _line: 1
+    - campaign_id: cmp_2
+      campaign_name: Social Final
+      channel: paid_social
+      start_date: '2026-02-05'
+      end_date: '2026-04-01'
+      _line: 4
+    - campaign_id: cmp_3
+      campaign_name: Display
+      channel: display
+      start_date: '2026-02-10'
+      end_date: null
+      _line: 3
+    - campaign_id: cmp_4
+      campaign_name: Open
+      channel: email
+      start_date: '2026-02-10'
+      end_date: null
+      _line: 5
