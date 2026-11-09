@@ -23,6 +23,11 @@ htmlcov/
 .env.*
 !.env.example
 
+# SSH keys and private
+keys/
+*.p8
+*.pem
+
 # Credentials and private keys
 credentials/
 secrets/
