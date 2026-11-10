@@ -1,0 +1,272 @@
+version: 2
+models:
+- name: int_salesforce__opportunities
+  description: One row per opportunity_id. Preserves every staged fact and its values; exact source IDs
+    define parent identity. No email matching or row removal.
+  tests:
+  - same_rows:
+      arguments:
+        compare_model: ref('stg_salesforce__opportunities')
+        columns:
+        - opportunity_id
+        - account_id
+        - amount
+        - stage
+        - created_at
+        - closed_at
+        - loaded_at
+        - _line
+        compare_where: 'true'
+      config:
+        severity: error
+  columns:
+  - name: opportunity_id
+    description: Source business key; trimmed, unique and required at this model's grain.
+    tests:
+    - not_null
+    - unique
+    - relationships:
+        arguments:
+          to: ref('stg_salesforce__opportunities')
+          field: opportunity_id
+        config:
+          severity: error
+  - name: account_id
+    description: Trimmed source identifier referencing stg_salesforce__accounts.
+  - name: amount
+    description: DECIMAL(18,2) amount after removing dollar signs, commas and surrounding spaces.
+  - name: stage
+    description: Lowercase stage with spaces and hyphens normalized to underscores.
+  - name: created_at
+    description: Parsed source wall-clock timestamp (TIMESTAMP_NTZ); accepts ISO, MM/DD/YYYY and YYYY/MM/DD
+      formats.
+  - name: closed_at
+    description: Parsed source wall-clock timestamp (TIMESTAMP_NTZ); accepts ISO, MM/DD/YYYY and YYYY/MM/DD
+      formats. Null and blank source values remain null.
+  - name: loaded_at
+    description: Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source
+      row.
+  - name: _line
+    description: Original Fivetran file line number; descending final tie-breaker within a source ID.
+  - name: is_orphan
+    description: True when the fact is ineligible for trusted Gold because a required parent or subscription
+      relationship is invalid.
+    tests:
+    - not_null
+    - accepted_values:
+        arguments:
+          values:
+          - true
+          - false
+          quote: false
+- name: int_stripe__subscriptions
+  description: One row per subscription_id. Preserves every staged fact and its values; exact source IDs
+    define parent identity. No email matching or row removal.
+  tests:
+  - same_rows:
+      arguments:
+        compare_model: ref('stg_stripe__subscriptions')
+        columns:
+        - subscription_id
+        - customer_id
+        - plan
+        - status
+        - start_date
+        - end_date
+        - loaded_at
+        - _line
+        compare_where: 'true'
+      config:
+        severity: error
+  columns:
+  - name: subscription_id
+    description: Source business key; trimmed, unique and required at this model's grain.
+    tests:
+    - not_null
+    - unique
+    - relationships:
+        arguments:
+          to: ref('stg_stripe__subscriptions')
+          field: subscription_id
+        config:
+          severity: error
+  - name: customer_id
+    description: Trimmed source identifier referencing stg_stripe__customers.
+  - name: plan
+    description: Trimmed lowercase mock subscription plan.
+  - name: status
+    description: Trimmed lowercase mock subscription status.
+  - name: start_date
+    description: Parsed source date; accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats.
+  - name: end_date
+    description: Parsed source date; accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats. Null and blank source
+      values remain null.
+  - name: loaded_at
+    description: Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source
+      row.
+  - name: _line
+    description: Original Fivetran file line number; descending final tie-breaker within a source ID.
+  - name: is_orphan
+    description: True when the fact is ineligible for trusted Gold because a required parent or subscription
+      relationship is invalid.
+    tests:
+    - not_null
+    - accepted_values:
+        arguments:
+          values:
+          - true
+          - false
+          quote: false
+- name: int_stripe__payments
+  description: One row per payment_id. Preserves every staged fact and its values; exact source IDs define
+    parent identity. No email matching or row removal.
+  tests:
+  - same_rows:
+      arguments:
+        compare_model: ref('stg_stripe__payments')
+        columns:
+        - payment_id
+        - customer_id
+        - email
+        - subscription_id
+        - amount
+        - currency
+        - status
+        - payment_at
+        - loaded_at
+        compare_where: 'true'
+      config:
+        severity: error
+  columns:
+  - name: payment_id
+    description: Source business key; trimmed, unique and required at this model's grain.
+    tests:
+    - not_null
+    - unique
+    - relationships:
+        arguments:
+          to: ref('stg_stripe__payments')
+          field: payment_id
+        config:
+          severity: error
+  - name: customer_id
+    description: Trimmed source identifier referencing stg_stripe__customers.
+  - name: email
+    description: Trimmed lowercase email; blank values become null. Not an identity key.
+  - name: subscription_id
+    description: Trimmed source identifier referencing stg_stripe__subscriptions.
+  - name: amount
+    description: Payment amount as DECIMAL(18,2).
+  - name: currency
+    description: Uppercase source currency code.
+  - name: status
+    description: Lowercase payment status.
+  - name: payment_at
+    description: Parsed source payment timestamp, without timezone.
+  - name: loaded_at
+    description: Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source
+      row.
+  - name: is_customer_orphan
+    description: Customer ID is absent from staged customers, including null IDs.
+    tests:
+    - not_null
+    - accepted_values:
+        arguments:
+          values:
+          - true
+          - false
+          quote: false
+  - name: is_subscription_missing
+    description: A non-null subscription ID is absent from Silver subscriptions. Null subscription IDs
+      are allowed.
+    tests:
+    - not_null
+    - accepted_values:
+        arguments:
+          values:
+          - true
+          - false
+          quote: false
+  - name: is_subscription_orphan
+    description: Referenced subscription has a missing customer.
+    tests:
+    - not_null
+    - accepted_values:
+        arguments:
+          values:
+          - true
+          - false
+          quote: false
+  - name: is_subscription_customer_mismatch
+    description: Payment and referenced subscription customer IDs differ, including a null on one side.
+    tests:
+    - not_null
+    - accepted_values:
+        arguments:
+          values:
+          - true
+          - false
+          quote: false
+  - name: is_orphan
+    description: True when the fact is ineligible for trusted Gold because a required parent or subscription
+      relationship is invalid.
+    tests:
+    - not_null
+    - accepted_values:
+        arguments:
+          values:
+          - true
+          - false
+          quote: false
+- name: int_data_quality__orphan_records
+  description: 'Current exception snapshot, one row per (source_system, record_type, record_id). Rebuilt
+    each run, not an audit history. Payment reason precedence: missing customer, missing subscription,
+    orphaned subscription, customer mismatch. Detailed flags remain in Silver.'
+  columns:
+  - name: exception_id
+    description: Stable SHA-256 of the JSON array of source system, record type and record ID.
+    tests:
+    - not_null
+    - unique
+  - name: source_system
+    description: Originating system.
+    tests:
+    - not_null
+    - accepted_values:
+        arguments:
+          values:
+          - salesforce
+          - stripe
+  - name: record_type
+    description: Source fact type.
+    tests:
+    - not_null
+    - accepted_values:
+        arguments:
+          values:
+          - opportunity
+          - subscription
+          - payment
+  - name: record_id
+    description: Original source business key.
+    tests:
+    - not_null
+  - name: parent_key
+    description: Missing customer/account or invalid subscription ID; null when the required source foreign
+      key itself is null.
+  - name: detected_at
+    description: UTC build start timestamp (TIMESTAMP_TZ) for this evaluation, not first-ever detection.
+    tests:
+    - not_null
+  - name: exception_reason
+    description: Primary reason the fact is excluded from trusted Gold.
+    tests:
+    - not_null
+    - accepted_values:
+        arguments:
+          values:
+          - missing_account
+          - missing_customer
+          - missing_subscription
+          - orphaned_subscription
+          - subscription_customer_mismatch

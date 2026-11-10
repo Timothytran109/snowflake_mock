@@ -4,6 +4,10 @@ config-version: 2
 
 profile: customer360
 
+flags:
+  # Layer builds test selected models and their existing ancestors, not unbuilt descendants.
+  indirect_selection: buildable
+
 model-paths:
   - models
 
@@ -35,3 +39,4 @@ models:
 
     marts:
       +materialized: table
+      +schema: GOLD

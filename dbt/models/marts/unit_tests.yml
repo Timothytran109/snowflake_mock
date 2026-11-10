@@ -1,0 +1,66 @@
+version: 2
+
+unit_tests:
+  - name: fct_opportunities_exclude_orphans
+    model: fct_opportunities
+    given:
+      - input: ref('int_salesforce__opportunities')
+        rows:
+          - opportunity_id: "valid"
+            is_orphan: false
+          - opportunity_id: "orphan"
+            is_orphan: true
+    expect:
+      rows:
+        - opportunity_id: "valid"
+
+  - name: fct_subscriptions_exclude_orphans
+    model: fct_subscriptions
+    given:
+      - input: ref('int_stripe__subscriptions')
+        rows:
+          - subscription_id: "valid"
+            is_orphan: false
+          - subscription_id: "orphan"
+            is_orphan: true
+    expect:
+      rows:
+        - subscription_id: "valid"
+
+  - name: gold_payments_exclude_orphans_and_enforce_trusted_subscription
+    model: fct_payments
+    given:
+      - input: ref('int_stripe__payments')
+        rows:
+          - payment_id: "valid"
+            customer_id: "C1"
+            subscription_id: "S1"
+            is_orphan: false
+          - payment_id: "standalone"
+            customer_id: "C1"
+            subscription_id: null
+            is_orphan: false
+          - payment_id: "orphan"
+            customer_id: "CX"
+            subscription_id: null
+            is_orphan: true
+          - payment_id: "untrusted_subscription"
+            customer_id: "C1"
+            subscription_id: "SX"
+            is_orphan: false
+          - payment_id: "mismatch"
+            customer_id: "C2"
+            subscription_id: "S1"
+            is_orphan: false
+      - input: ref('fct_subscriptions')
+        rows:
+          - subscription_id: "S1"
+            customer_id: "C1"
+    expect:
+      rows:
+        - payment_id: "valid"
+          customer_id: "C1"
+          subscription_id: "S1"
+        - payment_id: "standalone"
+          customer_id: "C1"
+          subscription_id: null

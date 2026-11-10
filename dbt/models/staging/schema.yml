@@ -17,6 +17,8 @@ models:
               arguments:
                 to: "ref('stg_stripe__customers')"
                 field: "customer_id"
+              config:
+                severity: warn
       - name: email
         description: "Trimmed lowercase email; blank values become null. Not an identity key."
       - name: subscription_id
@@ -83,6 +85,8 @@ models:
               arguments:
                 to: "ref('stg_stripe__customers')"
                 field: "customer_id"
+              config:
+                severity: warn
       - name: plan
         description: "Trimmed lowercase mock subscription plan."
         tests:
@@ -155,6 +159,8 @@ models:
               arguments:
                 to: "ref('stg_salesforce__accounts')"
                 field: "account_id"
+              config:
+                severity: warn
       - name: amount
         description: "DECIMAL(18,2) amount after removing dollar signs, commas and surrounding spaces."
         tests:

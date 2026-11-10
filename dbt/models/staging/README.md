@@ -46,14 +46,18 @@ values, relationships, source-key coverage across all seven models, and
 optional-date parsing on the selected source rows. Generated docs, logs and
 compiled SQL stay in ignored local directories.
 
-The initial live validation built all seven views and passed all six unit
-tests and 53 of 56 data tests. Three relationship tests correctly failed on
-missing RAW parent records: opportunity `OP_2002` references absent account
-`SF_1002`; subscription `SUB_7003` and payment `PAY_8003` reference absent
-customer `ST_9003`. The same gaps exist in RAW even when comparing IDs without
-case sensitivity. Correct these records in the source/ingestion workflow,
-then rerun the staging build. No rows are dropped, parents invented, or test
-severities reduced to conceal these gaps.
+Three intentional missing-parent relationships remain visible as warnings:
+opportunity `OP_2002` references absent account `SF_1002`; subscription
+`SUB_7003` and payment `PAY_8003` reference absent customer `ST_9003`.
+Only these three relationship test definitions use warning severity; they
+still report every missing parent, without an ID allowlist. Other staging
+tests, including the payment-to-subscription relationship, remain errors.
+
+Staging SQL and RAW data are unchanged. Silver intermediate models retain
+all staged facts and attach explicit orphan flags. The exception snapshot
+records affected facts, and trusted Gold fact models exclude them with
+error-level integrity and reconciliation tests. See
+[orphan handling](../intermediate/README.md) for the policy and build commands.
 
 Expected views under `CUSTOMER360_TEST.SILVER`:
 
