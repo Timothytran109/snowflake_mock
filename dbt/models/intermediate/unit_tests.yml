@@ -1,0 +1,271 @@
+version: 2
+
+unit_tests:
+  - name: opportunity_orphans_preserve_all_facts
+    model: int_salesforce__opportunities
+    given:
+      - input: ref('stg_salesforce__opportunities')
+        rows:
+          - opportunity_id: "valid"
+            account_id: "A1"
+            amount: 10
+          - opportunity_id: "missing"
+            account_id: "A2"
+            amount: 20
+          - opportunity_id: "null_key"
+            account_id: null
+            amount: 30
+      - input: ref('stg_salesforce__accounts')
+        rows:
+          - account_id: "A1"
+          - account_id: "A1"
+    expect:
+      rows:
+        - opportunity_id: "valid"
+          amount: 10
+          is_orphan: false
+        - opportunity_id: "missing"
+          amount: 20
+          is_orphan: true
+        - opportunity_id: "null_key"
+          amount: 30
+          is_orphan: true
+
+  - name: subscription_orphans_preserve_all_facts
+    model: int_stripe__subscriptions
+    given:
+      - input: ref('stg_stripe__subscriptions')
+        rows:
+          - subscription_id: "valid"
+            customer_id: "C1"
+          - subscription_id: "missing"
+            customer_id: "C2"
+          - subscription_id: "null_key"
+            customer_id: null
+      - input: ref('stg_stripe__customers')
+        rows:
+          - customer_id: "C1"
+          - customer_id: "C1"
+    expect:
+      rows:
+        - subscription_id: "valid"
+          is_orphan: false
+        - subscription_id: "missing"
+          is_orphan: true
+        - subscription_id: "null_key"
+          is_orphan: true
+
+  - name: payments_check_direct_and_transitive_relationships
+    model: int_stripe__payments
+    given:
+      - input: ref('stg_stripe__payments')
+        rows:
+          - payment_id: "valid"
+            customer_id: "C1"
+            subscription_id: "S1"
+            amount: 99
+          - payment_id: "standalone"
+            customer_id: "C1"
+            subscription_id: null
+            amount: 99
+          - payment_id: "customer_missing"
+            customer_id: "CX"
+            subscription_id: "SX"
+            amount: 99
+          - payment_id: "subscription_missing"
+            customer_id: "C1"
+            subscription_id: "unknown"
+            amount: 99
+          - payment_id: "subscription_orphan"
+            customer_id: "C1"
+            subscription_id: "SX"
+            amount: 99
+          - payment_id: "customer_mismatch"
+            customer_id: "C1"
+            subscription_id: "S2"
+            amount: 99
+          - payment_id: "null_customer"
+            customer_id: null
+            subscription_id: null
+            amount: 99
+      - input: ref('stg_stripe__customers')
+        rows:
+          - customer_id: "C1"
+          - customer_id: "C2"
+      - input: ref('int_stripe__subscriptions')
+        rows:
+          - subscription_id: "S1"
+            customer_id: "C1"
+            is_orphan: false
+          - subscription_id: "S2"
+            customer_id: "C2"
+            is_orphan: false
+          - subscription_id: "SX"
+            customer_id: "CX"
+            is_orphan: true
+    expect:
+      rows:
+        - payment_id: "valid"
+          is_customer_orphan: false
+          is_subscription_missing: false
+          is_subscription_orphan: false
+          is_subscription_customer_mismatch: false
+          is_orphan: false
+          amount: 99
+        - payment_id: "standalone"
+          is_customer_orphan: false
+          is_subscription_missing: false
+          is_subscription_orphan: false
+          is_subscription_customer_mismatch: false
+          is_orphan: false
+          amount: 99
+        - payment_id: "customer_missing"
+          is_customer_orphan: true
+          is_subscription_missing: false
+          is_subscription_orphan: true
+          is_subscription_customer_mismatch: false
+          is_orphan: true
+          amount: 99
+        - payment_id: "subscription_missing"
+          is_customer_orphan: false
+          is_subscription_missing: true
+          is_subscription_orphan: false
+          is_subscription_customer_mismatch: false
+          is_orphan: true
+          amount: 99
+        - payment_id: "subscription_orphan"
+          is_customer_orphan: false
+          is_subscription_missing: false
+          is_subscription_orphan: true
+          is_subscription_customer_mismatch: true
+          is_orphan: true
+          amount: 99
+        - payment_id: "customer_mismatch"
+          is_customer_orphan: false
+          is_subscription_missing: false
+          is_subscription_orphan: false
+          is_subscription_customer_mismatch: true
+          is_orphan: true
+          amount: 99
+        - payment_id: "null_customer"
+          is_customer_orphan: true
+          is_subscription_missing: false
+          is_subscription_orphan: false
+          is_subscription_customer_mismatch: false
+          is_orphan: true
+          amount: 99
+
+  - name: exception_snapshot_emits_one_primary_reason_per_fact
+    model: int_data_quality__orphan_records
+    given:
+      - input: ref('int_salesforce__opportunities')
+        rows:
+          - opportunity_id: "shared_id"
+            account_id: "AX"
+            is_orphan: true
+          - opportunity_id: "valid"
+            account_id: "A1"
+            is_orphan: false
+      - input: ref('int_stripe__subscriptions')
+        rows:
+          - subscription_id: "shared_id"
+            customer_id: "CX"
+            is_orphan: true
+          - subscription_id: "valid"
+            customer_id: "C1"
+            is_orphan: false
+      - input: ref('int_stripe__payments')
+        rows:
+          - payment_id: "valid"
+            customer_id: "C1"
+            subscription_id: "S1"
+            is_customer_orphan: false
+            is_subscription_missing: false
+            is_subscription_orphan: false
+            is_subscription_customer_mismatch: false
+            is_orphan: false
+          - payment_id: "standalone"
+            customer_id: "C1"
+            subscription_id: null
+            is_customer_orphan: false
+            is_subscription_missing: false
+            is_subscription_orphan: false
+            is_subscription_customer_mismatch: false
+            is_orphan: false
+          - payment_id: "customer_missing"
+            customer_id: "CX"
+            subscription_id: "SX"
+            is_customer_orphan: true
+            is_subscription_missing: false
+            is_subscription_orphan: true
+            is_subscription_customer_mismatch: false
+            is_orphan: true
+          - payment_id: "subscription_missing"
+            customer_id: "C1"
+            subscription_id: "unknown"
+            is_customer_orphan: false
+            is_subscription_missing: true
+            is_subscription_orphan: false
+            is_subscription_customer_mismatch: false
+            is_orphan: true
+          - payment_id: "subscription_orphan"
+            customer_id: "C1"
+            subscription_id: "SX"
+            is_customer_orphan: false
+            is_subscription_missing: false
+            is_subscription_orphan: true
+            is_subscription_customer_mismatch: true
+            is_orphan: true
+          - payment_id: "customer_mismatch"
+            customer_id: "C1"
+            subscription_id: "S2"
+            is_customer_orphan: false
+            is_subscription_missing: false
+            is_subscription_orphan: false
+            is_subscription_customer_mismatch: true
+            is_orphan: true
+          - payment_id: "null_customer"
+            customer_id: null
+            subscription_id: null
+            is_customer_orphan: true
+            is_subscription_missing: false
+            is_subscription_orphan: false
+            is_subscription_customer_mismatch: false
+            is_orphan: true
+    expect:
+      rows:
+        - source_system: "salesforce"
+          record_type: "opportunity"
+          record_id: "shared_id"
+          parent_key: "AX"
+          exception_reason: "missing_account"
+        - source_system: "stripe"
+          record_type: "subscription"
+          record_id: "shared_id"
+          parent_key: "CX"
+          exception_reason: "missing_customer"
+        - source_system: "stripe"
+          record_type: "payment"
+          record_id: "customer_missing"
+          parent_key: "CX"
+          exception_reason: "missing_customer"
+        - source_system: "stripe"
+          record_type: "payment"
+          record_id: "subscription_missing"
+          parent_key: "unknown"
+          exception_reason: "missing_subscription"
+        - source_system: "stripe"
+          record_type: "payment"
+          record_id: "subscription_orphan"
+          parent_key: "SX"
+          exception_reason: "orphaned_subscription"
+        - source_system: "stripe"
+          record_type: "payment"
+          record_id: "customer_mismatch"
+          parent_key: "S2"
+          exception_reason: "subscription_customer_mismatch"
+        - source_system: "stripe"
+          record_type: "payment"
+          record_id: "null_customer"
+          parent_key: null
+          exception_reason: "missing_customer"

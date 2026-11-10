@@ -2,31 +2,260 @@ version: 2
 
 models:
   - name: stg_stripe__payments
-    description: Cleaned and deduplicated Stripe payment records.
-
+    description: "Cleaned and deduplicated Stripe payment records; one row per payment_id. Existing transformation is unchanged."
     columns:
       - name: payment_id
+        description: "Source business key; trimmed, unique and required at this model's grain."
         tests:
           - not_null
           - unique
-
       - name: customer_id
+        description: "Trimmed source identifier referencing stg_stripe__customers."
         tests:
           - not_null
-
+          - relationships:
+              arguments:
+                to: "ref('stg_stripe__customers')"
+                field: "customer_id"
+              config:
+                severity: warn
+      - name: email
+        description: "Trimmed lowercase email; blank values become null. Not an identity key."
+      - name: subscription_id
+        description: "Trimmed source identifier referencing stg_stripe__subscriptions."
+        tests:
+          - relationships:
+              arguments:
+                to: "ref('stg_stripe__subscriptions')"
+                field: "subscription_id"
       - name: amount
+        description: "Payment amount as DECIMAL(18,2)."
         tests:
           - not_null
-
       - name: currency
+        description: "Uppercase source currency code."
         tests:
           - not_null
-
       - name: status
+        description: "Lowercase payment status."
         tests:
           - not_null
           - accepted_values:
               arguments:
-                values:
-                  - succeeded
-                  - failed
+                values: ["succeeded","failed"]
+      - name: payment_at
+        description: "Parsed source payment timestamp, without timezone."
+      - name: loaded_at
+        description: "Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source row."
+
+  - name: stg_stripe__customers
+    description: "One row per customer_id. Latest row per source ID, ordered by loaded_at, source date, then _line descending. Null timestamps sort last."
+    columns:
+      - name: customer_id
+        description: "Source business key; trimmed, unique and required at this model's grain."
+        tests:
+          - not_null
+          - unique
+      - name: email
+        description: "Trimmed lowercase email; blank values become null. Not an identity key."
+      - name: created_at
+        description: "Parsed source wall-clock timestamp (TIMESTAMP_NTZ); accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats."
+        tests:
+          - not_null
+      - name: loaded_at
+        description: "Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source row."
+      - name: _line
+        description: "Original Fivetran file line number; descending final tie-breaker within a source ID."
+        tests:
+          - not_null
+
+  - name: stg_stripe__subscriptions
+    description: "One row per subscription_id, linked to a Stripe customer. Latest row per source ID, ordered by loaded_at, source date, then _line descending. Null timestamps sort last."
+    columns:
+      - name: subscription_id
+        description: "Source business key; trimmed, unique and required at this model's grain."
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        description: "Trimmed source identifier referencing stg_stripe__customers."
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "ref('stg_stripe__customers')"
+                field: "customer_id"
+              config:
+                severity: warn
+      - name: plan
+        description: "Trimmed lowercase mock subscription plan."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["basic","pro","enterprise"]
+      - name: status
+        description: "Trimmed lowercase mock subscription status."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["active","canceled","past_due","trialing"]
+      - name: start_date
+        description: "Parsed source date; accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats."
+        tests:
+          - not_null
+      - name: end_date
+        description: "Parsed source date; accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats. Null and blank source values remain null."
+      - name: loaded_at
+        description: "Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source row."
+      - name: _line
+        description: "Original Fivetran file line number; descending final tie-breaker within a source ID."
+        tests:
+          - not_null
+
+  - name: stg_salesforce__accounts
+    description: "One row per account_id; shared emails are retained as separate accounts. Latest sync wins, followed by updated_at, created_at and _line descending, with null timestamps last."
+    columns:
+      - name: account_id
+        description: "Source business key; trimmed, unique and required at this model's grain."
+        tests:
+          - not_null
+          - unique
+      - name: email
+        description: "Trimmed lowercase email; blank values become null. Not an identity key."
+      - name: company_name
+        description: "Trimmed company name; original case retained."
+      - name: industry
+        description: "Trimmed industry; original case retained."
+      - name: created_at
+        description: "Parsed source wall-clock timestamp (TIMESTAMP_NTZ); accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats."
+        tests:
+          - not_null
+      - name: updated_at
+        description: "Parsed source wall-clock timestamp (TIMESTAMP_NTZ); accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats."
+        tests:
+          - not_null
+      - name: loaded_at
+        description: "Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source row."
+      - name: _line
+        description: "Original Fivetran file line number; descending final tie-breaker within a source ID."
+        tests:
+          - not_null
+
+  - name: stg_salesforce__opportunities
+    description: "One row per opportunity_id; equal amounts and shared accounts do not imply duplicates. Latest row per source ID, ordered by loaded_at, source date, then _line descending. Null timestamps sort last."
+    columns:
+      - name: opportunity_id
+        description: "Source business key; trimmed, unique and required at this model's grain."
+        tests:
+          - not_null
+          - unique
+      - name: account_id
+        description: "Trimmed source identifier referencing stg_salesforce__accounts."
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "ref('stg_salesforce__accounts')"
+                field: "account_id"
+              config:
+                severity: warn
+      - name: amount
+        description: "DECIMAL(18,2) amount after removing dollar signs, commas and surrounding spaces."
+        tests:
+          - not_null
+      - name: stage
+        description: "Lowercase stage with spaces and hyphens normalized to underscores."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["closed_won","closed_lost","proposal","negotiation"]
+      - name: created_at
+        description: "Parsed source wall-clock timestamp (TIMESTAMP_NTZ); accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats."
+        tests:
+          - not_null
+      - name: closed_at
+        description: "Parsed source wall-clock timestamp (TIMESTAMP_NTZ); accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats. Null and blank source values remain null."
+      - name: loaded_at
+        description: "Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source row."
+      - name: _line
+        description: "Original Fivetran file line number; descending final tie-breaker within a source ID."
+        tests:
+          - not_null
+
+  - name: stg_adobe__events
+    description: "One row per event_id, linked to an Adobe campaign. Latest row per source ID, ordered by loaded_at, source date, then _line descending. Null timestamps sort last."
+    columns:
+      - name: event_id
+        description: "Source business key; trimmed, unique and required at this model's grain."
+        tests:
+          - not_null
+          - unique
+      - name: email
+        description: "Trimmed lowercase email; blank values become null. Not an identity key."
+      - name: event_type
+        description: "Lowercase event type with spaces and hyphens normalized to underscores."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["email_open","click","page_view","form_submit"]
+      - name: device_type
+        description: "Trimmed lowercase mock device type."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["desktop","mobile","tablet"]
+      - name: campaign_id
+        description: "Trimmed source identifier referencing stg_adobe__campaigns."
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "ref('stg_adobe__campaigns')"
+                field: "campaign_id"
+      - name: event_timestamp
+        description: "Parsed source wall-clock timestamp (TIMESTAMP_NTZ); accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats."
+        tests:
+          - not_null
+      - name: loaded_at
+        description: "Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source row."
+      - name: _line
+        description: "Original Fivetran file line number; descending final tie-breaker within a source ID."
+        tests:
+          - not_null
+
+  - name: stg_adobe__campaigns
+    description: "One row per campaign_id. Latest row per source ID, ordered by loaded_at, source date, then _line descending. Null timestamps sort last."
+    columns:
+      - name: campaign_id
+        description: "Source business key; trimmed, unique and required at this model's grain."
+        tests:
+          - not_null
+          - unique
+      - name: campaign_name
+        description: "Trimmed campaign name; original case retained."
+        tests:
+          - not_null
+      - name: channel
+        description: "Trimmed lowercase channel with spaces and hyphens normalized to underscores."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["email","display","paid_social"]
+      - name: start_date
+        description: "Parsed source date; accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats."
+        tests:
+          - not_null
+      - name: end_date
+        description: "Parsed source date; accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats. Null and blank source values remain null."
+      - name: loaded_at
+        description: "Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source row."
+      - name: _line
+        description: "Original Fivetran file line number; descending final tie-breaker within a source ID."
+        tests:
+          - not_null

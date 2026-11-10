@@ -1,0 +1,155 @@
+version: 2
+models:
+- name: fct_opportunities
+  description: Trusted opportunity facts at one row per opportunity_id. Excludes missing accounts and
+    preserves the source opportunity amount; the export supplies no currency code.
+  tests:
+  - same_rows:
+      arguments:
+        compare_model: ref('int_salesforce__opportunities')
+        columns:
+        - opportunity_id
+        - account_id
+        - amount
+        - stage
+        - created_at
+        - closed_at
+        - loaded_at
+        compare_where: not is_orphan
+      config:
+        severity: error
+  columns:
+  - name: opportunity_id
+    description: Source business key; trimmed, unique and required at this model's grain.
+    tests:
+    - not_null
+    - unique
+  - name: account_id
+    description: Trimmed source identifier referencing stg_salesforce__accounts.
+    tests:
+    - not_null
+    - relationships:
+        arguments:
+          to: ref('stg_salesforce__accounts')
+          field: account_id
+        config:
+          severity: error
+  - name: amount
+    description: DECIMAL(18,2) amount after removing dollar signs, commas and surrounding spaces.
+    tests:
+    - not_null
+  - name: stage
+    description: Lowercase stage with spaces and hyphens normalized to underscores.
+  - name: created_at
+    description: Parsed source wall-clock timestamp (TIMESTAMP_NTZ); accepts ISO, MM/DD/YYYY and YYYY/MM/DD
+      formats.
+  - name: closed_at
+    description: Parsed source wall-clock timestamp (TIMESTAMP_NTZ); accepts ISO, MM/DD/YYYY and YYYY/MM/DD
+      formats. Null and blank source values remain null.
+  - name: loaded_at
+    description: Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source
+      row.
+- name: fct_subscriptions
+  description: Trusted current subscription state at one row per subscription_id. Excludes missing customers;
+    not a subscription history or recurring-revenue model.
+  tests:
+  - same_rows:
+      arguments:
+        compare_model: ref('int_stripe__subscriptions')
+        columns:
+        - subscription_id
+        - customer_id
+        - plan
+        - status
+        - start_date
+        - end_date
+        - loaded_at
+        compare_where: not is_orphan
+      config:
+        severity: error
+  columns:
+  - name: subscription_id
+    description: Source business key; trimmed, unique and required at this model's grain.
+    tests:
+    - not_null
+    - unique
+  - name: customer_id
+    description: Trimmed source identifier referencing stg_stripe__customers.
+    tests:
+    - not_null
+    - relationships:
+        arguments:
+          to: ref('stg_stripe__customers')
+          field: customer_id
+        config:
+          severity: error
+  - name: plan
+    description: Trimmed lowercase mock subscription plan.
+  - name: status
+    description: Trimmed lowercase mock subscription status.
+  - name: start_date
+    description: Parsed source date; accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats.
+  - name: end_date
+    description: Parsed source date; accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats. Null and blank source
+      values remain null.
+  - name: loaded_at
+    description: Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source
+      row.
+- name: fct_payments
+  description: Trusted payment facts at one row per payment_id. Excludes invalid customer/subscription
+    relationships. Amounts retain source currency and status, including failed payments; not a revenue
+    metric.
+  tests:
+  - same_rows:
+      arguments:
+        compare_model: ref('int_stripe__payments')
+        columns:
+        - payment_id
+        - customer_id
+        - subscription_id
+        - amount
+        - currency
+        - status
+        - payment_at
+        - loaded_at
+        compare_where: not is_orphan
+      config:
+        severity: error
+  columns:
+  - name: payment_id
+    description: Source business key; trimmed, unique and required at this model's grain.
+    tests:
+    - not_null
+    - unique
+  - name: customer_id
+    description: Trimmed source identifier referencing stg_stripe__customers.
+    tests:
+    - not_null
+    - relationships:
+        arguments:
+          to: ref('stg_stripe__customers')
+          field: customer_id
+        config:
+          severity: error
+  - name: subscription_id
+    description: Optional subscription ID referencing the trusted Gold fct_subscriptions model.
+    tests:
+    - relationships:
+        arguments:
+          to: ref('fct_subscriptions')
+          field: subscription_id
+        config:
+          severity: error
+  - name: amount
+    description: Payment amount as DECIMAL(18,2).
+    tests:
+    - not_null
+  - name: currency
+    description: Uppercase source currency code.
+  - name: status
+    description: Lowercase payment status.
+  - name: payment_at
+    description: Parsed source payment timestamp, without timezone.
+  - name: loaded_at
+    description: Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source
+      row.
