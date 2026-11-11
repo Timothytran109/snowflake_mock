@@ -1,0 +1,8 @@
+# Allow only dependency manifests into the build context. Runtime sources and
+# all credentials (including ignored files) stay outside image layers.
+**
+!requirements.txt
+!airflow/
+!airflow/requirements.txt
+!docker/
+!docker/airflow.Dockerfile
