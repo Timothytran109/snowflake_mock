@@ -1,0 +1,171 @@
+name: customer360-local
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow.Dockerfile
+  image: customer360-airflow:3.3.2-python3.12
+  user: "50000:0"
+  restart: unless-stopped
+  env_file:
+    - path: ./.local/customer360/runtime.env
+      required: false
+  environment: &airflow-environment
+    HOME: /home/airflow
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__CORE__PARALLELISM: "4"
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: localadmin:admin
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /run/secrets/simple_auth_passwords
+    AIRFLOW__CORE__FERNET_KEY_CMD: cat /run/secrets/fernet_key
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_CMD: cat /run/secrets/sql_alchemy_conn
+    AIRFLOW__API_AUTH__JWT_SECRET_CMD: cat /run/secrets/jwt_secret
+    AIRFLOW__API__SECRET_KEY_CMD: cat /run/secrets/api_secret_key
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+    AIRFLOW__API__BASE_URL: http://localhost:${CUSTOMER360_AIRFLOW_PORT:-8081}
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "30"
+    CUSTOMER360_SCHEDULE: ""
+    CUSTOMER360_DBT_PROJECT_DIR: /opt/customer360/dbt
+    CUSTOMER360_DBT_EXECUTABLE: /opt/dbt/bin/dbt
+    CUSTOMER360_DBT_PROFILES_DIR: /opt/airflow/secrets/dbt
+    DBT_PROFILES_DIR: /opt/airflow/secrets/dbt
+    DBT_TARGET: dev
+    DBT_TARGET_PATH: /tmp/customer360-dbt-target
+    DBT_LOG_PATH: /tmp/customer360-dbt-logs
+    PYTHONDONTWRITEBYTECODE: "1"
+  volumes:
+    - type: bind
+      source: ./airflow/dags
+      target: /opt/airflow/dags
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./airflow/tests
+      target: /opt/airflow/tests
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./dbt
+      target: /opt/customer360/dbt
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${CUSTOMER360_DBT_PROFILES_HOST_DIR:-./.local/customer360/dbt}
+      target: /opt/airflow/secrets/dbt
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${CUSTOMER360_KEYS_HOST_DIR:-./.local/customer360/keys}
+      target: /opt/airflow/secrets/keys
+      read_only: true
+      bind:
+        create_host_path: false
+    - airflow-logs:/opt/airflow/logs
+  secrets:
+    - sql_alchemy_conn
+    - fernet_key
+    - jwt_secret
+    - api_secret_key
+    - simple_auth_passwords
+  depends_on: &airflow-dependencies
+    postgres:
+      condition: service_healthy
+    airflow-init:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:16.10-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_DB: airflow
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  airflow-init:
+    <<: *airflow-common
+    restart: "no"
+    command: [db, migrate]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-api-server:
+    <<: *airflow-common
+    environment:
+      <<: *airflow-environment
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/simple_auth_passwords.json
+    # SimpleAuthManager opens its password file for append even when all users
+    # already exist. Keep the source secret read-only and use a private runtime copy.
+    command:
+      - bash
+      - -c
+      - umask 077; cp /run/secrets/simple_auth_passwords /opt/airflow/simple_auth_passwords.json && exec airflow api-server --workers 1
+    ports:
+      - "127.0.0.1:${CUSTOMER360_AIRFLOW_PORT:-8081}:8080"
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, http://localhost:8080/api/v2/monitor/health]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      <<: *airflow-dependencies
+      airflow-api-server:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, http://localhost:8974/health]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: [CMD-SHELL, 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 20s
+      retries: 10
+      start_period: 90s
+
+volumes:
+  postgres-data:
+  airflow-logs:
+
+secrets:
+  postgres_password:
+    file: ./.local/customer360/secrets/postgres_password
+  sql_alchemy_conn:
+    file: ./.local/customer360/secrets/sql_alchemy_conn
+  fernet_key:
+    file: ./.local/customer360/secrets/fernet_key
+  jwt_secret:
+    file: ./.local/customer360/secrets/jwt_secret
+  api_secret_key:
+    file: ./.local/customer360/secrets/api_secret_key
+  simple_auth_passwords:
+    file: ./.local/customer360/secrets/simple_auth_passwords.json

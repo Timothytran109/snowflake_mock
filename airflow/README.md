@@ -41,6 +41,137 @@ snapshots. Do not use this DAG to claim historical point-in-time backfills. Sync
 completion and RAW checks are not a cross-connection transactional snapshot; an
 independent later ingestion can still update RAW during a build.
 
+## Local Docker Desktop environment
+
+The repository-root `compose.yaml` uses `docker/airflow.Dockerfile`. There is one
+Compose project, `customer360-local`, isolated from other local Airflow projects.
+The official `apache/airflow:3.3.2-python3.12` image is extended with the existing
+Airflow requirements and matching official constraints. The root pinned dbt
+requirements install separately into `/opt/dbt`, including dbt-core 1.12.6 and
+dbt-snowflake 1.12.5. `dbt` is available on PATH without replacing Airflow's Python.
+The build context allows only the Dockerfile and dependency manifests; no source
+credentials, profiles, keys, `.env` files, or repository data enter image layers.
+
+Services:
+
+- `postgres`: private PostgreSQL 16.10 metadata database with persistent storage and a readiness check; no host port.
+- `airflow-init`: one-shot, repeatable metadata migration after PostgreSQL becomes healthy.
+- `airflow-api-server`: UI/API on **http://localhost:8081**, bound only to `127.0.0.1`, with an HTTP health check.
+- `airflow-scheduler`: LocalExecutor scheduler/task runner, started after initialization and API health, with scheduler heartbeat health checks.
+- `airflow-dag-processor`: separate Airflow 3 parser process with a DagProcessorJob health check.
+
+Airflow services run as UID 50000, not root. LocalExecutor needs neither Redis nor
+a Celery worker. The current reschedule sensors do not require a triggerer.
+The SimpleAuthManager is for local development only; this is not a production
+deployment. Do not expose its port publicly. The official Airflow documentation
+describes [SimpleAuthManager's development scope](https://airflow.apache.org/docs/apache-airflow/3.3.2/core-concepts/auth-manager/simple/index.html).
+
+### Startup from Windows PowerShell
+
+Use Docker Desktop in Linux-container mode and current Docker Compose (2.24 or
+newer for optional environment files). Allocate sufficient memory for the stack
+and any other running containers; 8 GB for Docker is a useful starting point.
+Run all commands from the repository root:
+
+```powershell
+Set-Location C:\Projects\work_projects\mock_project
+.\docker\Initialize-LocalAirflow.ps1
+docker compose config --quiet
+docker compose build
+docker compose up -d --wait --wait-timeout 300
+docker compose ps --all
+```
+
+The initializer generates cryptographically random local PostgreSQL, Fernet,
+JWT/API and UI passwords under `.local/customer360/secrets/`. It restricts the
+local directory's Windows ACL to the current user, SYSTEM and Administrators;
+preserves existing nonempty secrets on reruns; and never prints their values.
+It also creates empty dbt/key directories and an optional `runtime.env`. It does
+not read or copy your existing Snowflake/dbt credentials. Docker Compose mounts
+the infrastructure files as secrets; they are not interpolated into Compose YAML.
+These local secret files still need host disk protection: Compose file secrets
+are mounts, not an encrypted vault. Do not regenerate them while reusing the
+metadata volume, especially the PostgreSQL password and Fernet key.
+The API server copies the pre-generated UI password into a private writable file
+at startup because SimpleAuthManager opens it for append. The source secret stays
+read-only, and no generated password needs to appear in startup logs.
+
+Open the UI at http://localhost:8081 and sign in as `localadmin`. Privately open
+`.local/customer360/secrets/simple_auth_passwords.json` for the generated password;
+do not paste it into logs or chat. No integration credentials are required just
+to start, parse or test this stack. The DAG remains paused and **unscheduled**.
+Compose explicitly sets `CUSTOMER360_SCHEDULE` to an empty string; a host variable
+cannot accidentally schedule it. Existing metadata preserves operator pause state
+across restarts, so startup does not forcibly re-pause a previously unpaused DAG.
+
+Optional PowerShell variables before starting Compose:
+
+```powershell
+# Only change these when needed. Use absolute Windows paths for custom mounts.
+$env:CUSTOMER360_AIRFLOW_PORT = '8081'
+# $env:CUSTOMER360_DBT_PROFILES_HOST_DIR = 'C:\private\customer360\dbt'
+# $env:CUSTOMER360_KEYS_HOST_DIR = 'C:\private\customer360\keys'
+```
+
+There are no required host environment variables for an unconfigured local stack.
+`CUSTOMER360_ALERT_EMAILS` and any profile `env_var()` values are required only
+before running the pipeline. Put them in the ignored
+`.local/customer360/runtime.env` (standard `NAME=value` format). All Airflow
+services load that file at container creation; use `docker compose up -d
+--force-recreate` after changes. Avoid plain `docker compose config` when runtime
+secrets are present because it can display expanded environment values; use
+`--quiet` for validation. Do not print `docker inspect` environment payloads.
+
+### Mounted paths and manual credentials
+
+The Airflow services share these read-only bind mounts:
+
+- `airflow/dags` -> `/opt/airflow/dags`
+- `airflow/tests` -> `/opt/airflow/tests`
+- `dbt` -> `/opt/customer360/dbt`
+- `.local/customer360/dbt` (or `CUSTOMER360_DBT_PROFILES_HOST_DIR`) -> `/opt/airflow/secrets/dbt`
+- `.local/customer360/keys` (or `CUSTOMER360_KEYS_HOST_DIR`) -> `/opt/airflow/secrets/keys`
+
+Named volumes `customer360-local_postgres-data` and
+`customer360-local_airflow-logs` retain metadata and shared task logs. dbt writes
+ad-hoc CLI artifacts into `/tmp`; the DAG creates a private directory per attempt.
+No Docker socket or whole home directory is mounted. The default profiles and key
+directories are deliberately empty, so an accidental pipeline run cannot reach
+Snowflake using an existing host profile.
+
+Before an intentional pipeline run, manually configure the three Airflow
+Connections documented below: `customer360_fivetran`, `customer360_snowflake_raw`,
+and `customer360_smtp`. Use the UI to avoid putting passwords into command history.
+Provide the Fivetran API key/secret and existing connection/destination IDs,
+Snowflake service-user authentication, warehouse/account and dedicated non-admin
+role, plus SMTP authentication and sender details. The UI stores connection
+secrets encrypted with the mounted Fernet key.
+
+Place a Linux-compatible `profiles.yml` in the selected dbt profile directory.
+Use profile `customer360`, target `dev`, `CUSTOMER360_TEST`, `SILVER`, and
+`C360_DBT_ROLE` (or another dedicated transformation role), never `ACCOUNTADMIN`.
+If using key authentication, place the key in the selected key directory and
+reference `/opt/airflow/secrets/keys/<filename>` in the profile/connection, not a
+Windows host path. Use runtime `env_var()` values for sensitive profile fields
+where practical. The existing DAG's profile and manifest guards still reject
+production destinations and administrative roles. Azure credentials are not needed
+by this local setup; a future secret backend must be configured separately.
+
+### Shutdown and restart without removing data
+
+```powershell
+docker compose stop
+# Resume the same containers and stored metadata:
+docker compose start
+# Alternatively remove this project's containers/network, retaining named volumes:
+docker compose down
+# Recreate later:
+docker compose up -d --wait --wait-timeout 300
+```
+
+Do not add `--volumes`/`-v`, run volume prune, or delete the local secret files.
+The setup and validation scripts never remove volumes or modify other projects.
+
 ## Runtime and dependencies
 
 Run Airflow on Linux with Python 3.12. Install `airflow/requirements.txt` with the
@@ -194,32 +325,31 @@ They cover imports without secret/network access, exact dependencies, operationa
 defaults, sync freshness/failures, destination checks, RAW checks, dbt warning/error
 handling, routing guards, artifact isolation and process cleanup.
 
-From the repository root in PowerShell, with Docker Desktop running:
+From the repository root in PowerShell, with Docker Desktop running, initialize
+once and use the reusable validation script. It builds when `-Build` is supplied,
+starts/checks services, verifies CLI import results, runs the DAG and container
+tests, compares the mounted DAG's SHA256 with the host file, and reads scheduler
+logs. It does not trigger the pipeline or test external credentials.
 
 ```powershell
-$airflowSource = Join-Path (Get-Location) 'airflow'
-$airflowImage = 'apache/airflow:3.3.2-python3.12'
-docker run --rm --entrypoint /usr/local/bin/python `
-  --mount "type=bind,source=$airflowSource,target=/opt/customer360-airflow,readonly" `
-  -e HOME=/home/airflow -e PYTHONDONTWRITEBYTECODE=1 `
-  -e AIRFLOW__CORE__DAGS_FOLDER=/opt/customer360-airflow/dags `
-  -e AIRFLOW__CORE__LOAD_EXAMPLES=False `
-  $airflowImage -m unittest discover -s /opt/customer360-airflow/tests -v
+.\docker\Initialize-LocalAirflow.ps1
+.\docker\Validate-LocalAirflow.ps1 -Build
 
-docker run --rm --entrypoint /bin/bash `
-  --mount "type=bind,source=$airflowSource,target=/opt/customer360-airflow,readonly" `
-  -e HOME=/home/airflow -e PYTHONDONTWRITEBYTECODE=1 `
-  -e AIRFLOW__CORE__DAGS_FOLDER=/opt/customer360-airflow/dags `
-  -e AIRFLOW__CORE__LOAD_EXAMPLES=False `
-  $airflowImage -c '/home/airflow/.local/bin/airflow db migrate && /home/airflow/.local/bin/airflow dags list --local --output json'
+# Individual checks after startup:
+docker compose config --quiet
+docker compose ps --all
+docker compose exec -T airflow-scheduler airflow dags list
+docker compose exec -T airflow-scheduler airflow dags list-import-errors
+docker compose exec -T airflow-scheduler dbt --version
+docker compose exec -T airflow-scheduler python -m unittest discover -s /opt/airflow/tests -v
+docker compose logs --no-color --tail 60 airflow-scheduler
 ```
 
-The tested image already includes the pinned providers in `requirements.txt`.
-For custom images, install that requirements file with the matching constraints
-and rerun these checks. Validation mounts only `airflow/`, not host credentials or
-the dbt profile; it does not start a scheduler or run ingestion. CLI parsing
-initializes an ephemeral SQLite metadata database inside the disposable container.
-Use an appropriately managed external metadata database for an actual deployment.
+The container tests require the custom image and Compose mounts; running them
+against an unextended base image will fail the dbt availability checks. Provider
+availability and versions, read-only mounts, non-root execution, default schedule,
+and runtime secret-file presence are checked without displaying secret values.
+The Dockerfile also runs `pip check` in both Python environments during the build.
 
 Run database validation separately from `dbt/`, with the existing authorized TEST
 profile and repository dbt environment:
@@ -237,5 +367,7 @@ are not exercised by the automated import/structure tests.
 ## Integration references
 
 - [Airflow 3.3.2 TaskFlow](https://airflow.apache.org/docs/apache-airflow/3.3.2/tutorial/taskflow.html)
+- [Airflow Docker environment guidance](https://airflow.apache.org/docs/apache-airflow/3.3.2/howto/docker-compose/index.html)
+- [Extending the official Airflow image](https://airflow.apache.org/docs/docker-stack/build.html)
 - [Fivetran connection details and sync status](https://fivetran.com/docs/developer-resources/rest-api/api-reference/connections/connection-details)
 - [Fivetran destination details](https://fivetran.com/docs/developer-resources/rest-api/api-reference/destinations/destination-details)
