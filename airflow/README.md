@@ -46,8 +46,8 @@ independent later ingestion can still update RAW during a build.
 The repository-root `compose.yaml` uses `docker/airflow.Dockerfile`. There is one
 Compose project, `customer360-local`, isolated from other local Airflow projects.
 The official `apache/airflow:3.3.2-python3.12` image is extended with the existing
-Airflow requirements and matching official constraints. The root pinned dbt
-requirements install separately into `/opt/dbt`, including dbt-core 1.12.6 and
+Airflow requirements and matching official constraints. The pinned
+`dbt/requirements.txt` installs separately into `/opt/dbt`, including dbt-core 1.12.6 and
 dbt-snowflake 1.12.5. `dbt` is available on PATH without replacing Airflow's Python.
 The build context allows only the Dockerfile and dependency manifests; no source
 credentials, profiles, keys, `.env` files, or repository data enter image layers.
@@ -182,8 +182,46 @@ python -m pip install -r airflow/requirements.txt \
   --constraint https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.12.txt
 ```
 
-Keep dbt in a separate virtual environment to avoid dependency conflicts. Install
-the repository-root `requirements.txt` there during worker image preparation.
+Dependency inputs are UTF-8 text with distinct ownership:
+
+- `airflow/requirements.txt`: Airflow 3.3.2 and providers, installed with the official
+  Python 3.12 constraints into the image's Airflow Python environment.
+- `dbt/requirements.txt`: dbt-core 1.12.6 and dbt-snowflake 1.12.5 only, installed in
+  `/opt/dbt` without system site packages. The root `requirements.txt` forwards to
+  this file for existing local setup commands.
+- `requirements-dev.txt`: pinned pytest and Ruff for development only. The optional
+  Docker `development` target installs them into `/opt/customer360/dev`, inheriting
+  Airflow's site packages for DAG testing. They are absent from the final runtime
+  target and from `/opt/dbt`.
+
+Runtime manifests contain direct dependencies rather than a local `pip freeze`.
+pip resolves dbt's transitive dependencies during installation; they are not a
+complete lockfile. Airflow retains its matching official constraints. Never install
+the combined contents of a developer environment into `/opt/dbt`.
+
+For local dbt commands in PowerShell:
+
+```powershell
+py -3.12 -m venv .venv312
+.\.venv312\Scripts\python.exe -m pip install -r dbt/requirements.txt
+```
+
+Builds may download the base image, Airflow constraints and Python dependencies
+from registries and package indexes unless cached. This applies to both the runtime
+and optional developer image. Build the developer image first, then run the mocked
+DAG tests in a separate container with networking disabled and no credentials or
+profiles mounted:
+
+```powershell
+docker build -f docker/airflow.Dockerfile --target development -t customer360-airflow-dev:3.3.2-python3.12 .
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/python --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" customer360-airflow-dev:3.3.2-python3.12 -m pytest /opt/airflow/source/tests/test_customer360_pipeline.py -q -p no:cacheprovider
+```
+
+`docker compose build` builds the final runtime target without the developer
+environment. The Dockerfile runs `pip check` in both runtime environments and
+fails the build if Airflow is discoverable from `/opt/dbt`. Container tests also
+reject pytest and Ruff in that isolated environment.
+
 Deploy the same dbt project revision and dependencies to every worker. The DAG
 uses these environment variables (defaults shown):
 
@@ -350,6 +388,40 @@ against an unextended base image will fail the dbt availability checks. Provider
 availability and versions, read-only mounts, non-root execution, default schedule,
 and runtime secret-file presence are checked without displaying secret values.
 The Dockerfile also runs `pip check` in both Python environments during the build.
+
+### Dependency validation without restarting the stack
+
+The following checks use newly built images in temporary containers. Build commands
+may use networking; test containers use `--network none`. They do not start Airflow
+processes, recreate services, or contact Snowflake, Fivetran or SMTP. Run from the
+repository root in PowerShell, with the existing scheduler container present:
+
+```powershell
+docker compose config --quiet
+docker compose build airflow-scheduler
+docker build -f docker/airflow.Dockerfile --target development -t customer360-airflow-dev:3.3.2-python3.12 .
+
+# DAG imports, provider behavior and serialization with all external calls mocked.
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/python --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" customer360-airflow-dev:3.3.2-python3.12 -m pytest /opt/airflow/source/tests/test_customer360_pipeline.py -q -p no:cacheprovider
+
+# Both runtime environments must have consistent installed dependencies.
+docker run --rm --network none --entrypoint python customer360-airflow:3.3.2-python3.12 -m pip check
+docker run --rm --network none --entrypoint /opt/dbt/bin/python customer360-airflow:3.3.2-python3.12 -m pip check
+
+# Six container checks: pins, isolation, pip check, mounts, defaults and dbt parse.
+# Reuse only read-only mounts, not the scheduler's environment or running processes.
+$customer360Scheduler = docker compose ps -q airflow-scheduler
+if (-not $customer360Scheduler) { throw 'An existing scheduler container is required for mount validation.' }
+docker run --rm --network none --volumes-from "${customer360Scheduler}:ro" --entrypoint python -e PYTHONPATH=/opt/airflow/tests -e CUSTOMER360_SCHEDULE= -e CUSTOMER360_DBT_PROJECT_DIR=/opt/customer360/dbt -e AIRFLOW__CORE__EXECUTOR=LocalExecutor -e AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true customer360-airflow:3.3.2-python3.12 -m unittest discover -s /opt/airflow/tests -p test_container_runtime.py -k version -k isolated -k consistent_dependencies -k read_only -k non_root -k parses -v
+```
+
+The container checks verify `/usr/local/bin/dbt` resolves to `/opt/dbt/bin/dbt`,
+dbt Core/adapter versions match their pins, and Airflow, pytest and Ruff are absent
+from `/opt/dbt`. Parsing uses a temporary dummy profile and cannot authenticate to
+Snowflake. The live metadata pause-state test is outside these dependency checks;
+it remains part of the full stack suite above. No operator pause state is changed.
+Running services retain their current image until explicitly recreated, even when
+the same image tag has been rebuilt.
 
 Run database validation separately from `dbt/`, with the existing authorized TEST
 profile and repository dbt environment:

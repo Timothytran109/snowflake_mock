@@ -1,0 +1,3 @@
+# Direct dbt runtime dependencies only; install into /opt/dbt or a dedicated venv.
+dbt-core==1.12.6
+dbt-snowflake==1.12.5

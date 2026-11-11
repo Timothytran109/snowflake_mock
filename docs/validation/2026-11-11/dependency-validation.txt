@@ -1,0 +1,100 @@
+Customer 360 dependency execution validation
+Date: 2026-11-11 (America/Los_Angeles)
+Scope: F-01 and F-02, following the run-002 review.
+Working directory: C:\Projects\work_projects\mock_project
+Shell: Windows PowerShell; Docker Desktop Linux containers.
+
+Commands below were executed during this validation. No audit report was edited.
+Build installation layers were cached. Image construction succeeded; installed
+dependencies were checked again in fresh containers. Builds may need registry,
+GitHub constraints, and package-index access when those inputs are not cached.
+All test/verification containers below used --network none.
+
+1. Compose and image builds
+
+docker compose config --quiet
+Result: exit 0.
+
+docker compose build airflow-scheduler
+Result: exit 0; runtime image customer360-airflow:3.3.2-python3.12 built.
+
+docker build -f docker/airflow.Dockerfile --target development -t customer360-airflow-dev:3.3.2-python3.12 .
+Result: exit 0; optional development image built.
+
+2. Airflow unit tests, imports and DAG serialization
+
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/python --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" customer360-airflow-dev:3.3.2-python3.12 -m pytest /opt/airflow/source/tests/test_customer360_pipeline.py -q -p no:cacheprovider
+Result: exit 0; 28 passed in 22.15s. Includes DagBag import and serialization,
+task dependencies, mocked Fivetran behavior, RAW validation, dbt failures/warnings,
+SMTP notification behavior, and routing/safety guards. No credentials mounted.
+
+3. Runtime dependency consistency
+
+docker run --rm --network none --entrypoint python customer360-airflow:3.3.2-python3.12 -m pip check
+Result: exit 0; No broken requirements found.
+
+docker run --rm --network none --entrypoint /opt/dbt/bin/python customer360-airflow:3.3.2-python3.12 -m pip check
+Result: exit 0; No broken requirements found.
+
+4. Container tests against rebuilt runtime and existing read-only mounts
+
+$customer360Scheduler = docker compose ps -q airflow-scheduler
+if (-not $customer360Scheduler) { throw 'An existing scheduler container is required for mount validation.' }
+docker run --rm --network none --volumes-from "${customer360Scheduler}:ro" --entrypoint python -e PYTHONPATH=/opt/airflow/tests -e CUSTOMER360_SCHEDULE= -e CUSTOMER360_DBT_PROJECT_DIR=/opt/customer360/dbt -e AIRFLOW__CORE__EXECUTOR=LocalExecutor -e AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true customer360-airflow:3.3.2-python3.12 -m unittest discover -s /opt/airflow/tests -p test_container_runtime.py -k version -k isolated -k consistent_dependencies -k read_only -k non_root -k parses -v
+Result: exit 0; 6 tests passed in 37.087s:
+- Airflow 3.3.2 and Snowflake provider 6.17.0.
+- Both runtime environments pass pip check.
+- dbt executable/pins and isolation from Airflow/pytest/Ruff.
+- Credential-free dbt parse --no-partial-parse; all model destinations TEST SILVER/GOLD.
+- Non-root execution, local defaults and secret-file presence (stat only).
+- Source and secret directories mounted read-only.
+
+Only mounts were inherited, not the live container's environment or processes.
+The existing live-metadata pause-state test was outside this dependency selection.
+No tests were removed or weakened. Live operator state was not changed.
+
+5. Explicit provider imports and dbt verification
+
+docker run --rm --network none --entrypoint python customer360-airflow:3.3.2-python3.12 -c "from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook; from airflow.providers.smtp.hooks.smtp import SmtpHook; from fivetran_provider_async.operators import FivetranOperator; from fivetran_provider_async.sensors import FivetranSensor; print('Snowflake, SMTP and Fivetran operator/sensor imports: PASS')"
+Result: exit 0; Snowflake, SMTP and Fivetran operator/sensor imports: PASS.
+
+docker run --rm --network none --entrypoint /opt/dbt/bin/python customer360-airflow:3.3.2-python3.12 -c "import importlib.metadata as m, importlib.util as u, json; from pathlib import Path; pins={'dbt-core':'1.12.6','dbt-snowflake':'1.12.5'}; actual={k:m.version(k) for k in pins}; absent={k:u.find_spec(k) is None for k in ('airflow','pytest','ruff')}; resolved=str(Path('/usr/local/bin/dbt').resolve()); print(json.dumps({'versions':actual,'absent_from_dbt':absent,'resolved_dbt':resolved},sort_keys=True)); assert actual==pins and all(absent.values()) and resolved=='/opt/dbt/bin/dbt'"
+Result: exit 0. dbt-core=1.12.6; dbt-snowflake=1.12.5;
+airflow/pytest/ruff all absent; resolved executable=/opt/dbt/bin/dbt.
+
+6. Existing stack image comparison (no environment/credential output)
+
+$customer360Image = docker image inspect --format '{{.Id}}' customer360-airflow:3.3.2-python3.12
+foreach ($service in @('airflow-api-server', 'airflow-scheduler', 'airflow-dag-processor', 'airflow-triggerer')) {
+    $customer360Container = docker compose ps -q $service
+    if ($customer360Container) {
+        $customer360RunningImage = docker inspect --format '{{.Image}}' $customer360Container
+        Write-Output ($service + ': uses current image=' + ($customer360RunningImage -eq $customer360Image))
+    }
+}
+Write-Output ('Rebuilt runtime image ID: ' + $customer360Image)
+Result: all four Airflow services reported uses current image=False.
+Rebuilt runtime image ID:
+sha256:b25edef90d7acc7558a7da88e4e2de992d268bb5091043d26e7e432d848517d7
+The existing stack was not recreated. Tests above used the rebuilt images.
+
+7. Repository checks
+
+git diff --check
+Result: exit 0; working-copy LF/CRLF notices only.
+
+(Get-FileHash docs/audits/2026-11-11/run-001/repository-audit.md).Hash
+Unchanged: 6B88687635453287D7DB057D3D11881C4653BEAB6E6B1222937F3179AAAA8E27
+
+(Get-FileHash docs/audits/2026-11-11/run-002/repository-audit.md).Hash
+Unchanged: 99ED45A18E38AF46BE98945E127ECA7A92CFF3D1F575F6CEAA008CFA2E605582
+
+Changes during this validation:
+- airflow/README.md: distinguish build downloads from network-disabled tests;
+  document dependency checks that do not recreate the stack.
+- This execution record.
+
+Limitations: the full live-stack suite and live data/integration tests were not
+run. Existing services retain the previous image. Transitive dependency locking
+remains outside scope. No DAG, Fivetran sync, Snowflake connection, SMTP message,
+credential change, commit or push was performed.

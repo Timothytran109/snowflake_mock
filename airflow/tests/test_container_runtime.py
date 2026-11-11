@@ -43,8 +43,9 @@ class ContainerRuntimeTests(unittest.TestCase):
                 "/opt/dbt/bin/python",
                 "-c",
                 "import importlib.metadata as m, importlib.util, json; "
+                "blocked = ['airflow', 'pytest', 'ruff']; "
                 "print(json.dumps([m.version('dbt-core'), m.version('dbt-snowflake'), "
-                "importlib.util.find_spec('airflow') is None]))",
+                "all(importlib.util.find_spec(name) is None for name in blocked)]))",
             ],
             check=True,
             capture_output=True,
@@ -52,6 +53,17 @@ class ContainerRuntimeTests(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(json.loads(result.stdout), ["1.12.6", "1.12.5", True])
+
+    def test_both_runtime_environments_have_consistent_dependencies(self):
+        for executable in (shutil.which("python"), "/opt/dbt/bin/python"):
+            with self.subTest(executable=executable):
+                result = subprocess.run(
+                    [executable, "-m", "pip", "check"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_sources_and_secret_directories_are_mounted_read_only(self):
         mounts = {}

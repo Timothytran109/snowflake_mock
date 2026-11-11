@@ -1,5 +1,5 @@
 # Install in Linux with the matching official Airflow Python 3.12 constraints.
-# Keep dbt in its own environment using the repository-root requirements.txt.
+# Keep dbt isolated using dbt/requirements.txt; tools use requirements-dev.txt.
 apache-airflow==3.3.2
 apache-airflow-providers-standard==1.19.0
 apache-airflow-providers-snowflake==6.17.0

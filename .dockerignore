@@ -2,18 +2,20 @@
 # The final exclusions also protect sensitive/generated files inside allowed trees.
 **
 !requirements.txt
+!requirements-dev.txt
 !airflow/
 !airflow/requirements.txt
 !docker/
 !docker/airflow.Dockerfile
 
 # Required Airflow and dbt sources. These exceptions make them available to COPY;
-# the current Dockerfile still copies only the two requirements files.
+# the Dockerfile copies only the required dependency manifests.
 !airflow/dags/
 !airflow/dags/**
 !airflow/tests/
 !airflow/tests/**
 !dbt/
+!dbt/requirements.txt
 !dbt/dbt_project.yml
 !dbt/models/
 !dbt/models/**
