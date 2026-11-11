@@ -1,5 +1,6 @@
 # Python virtual environments
 .venv/
+.venv*/
 venv/
 env/
 ENV/
@@ -36,6 +37,19 @@ keys/
 *.key
 *.crt
 *.p12
+*.pfx
+*.cer
+*.der
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+.dbt/
+.azure/
+.aws/
+.ssh/
 *.json
 
 # Logs
@@ -52,23 +66,38 @@ airflow.db
 airflow.cfg
 airflow-webserver.pid
 airflow-scheduler.pid
+airflow/logs
+*.pid
+simple_auth_manager_passwords.json*
 
 # dbt generated files
 dbt/target/
 dbt/logs/
 dbt/dbt_packages/
 dbt/.user.yml
+target/
+dbt_packages/
 
 # Snowflake/dbt local artifacts
 *.sqlite
 *.db
+*.sqlite3
+*.db-*
+*.sqlite-*
+*.sqlite3-*
 
 # Docker local overrides
 docker-compose.override.yml
+docker-compose.override.yaml
 compose.override.yaml
 compose.override.yml
 .local/
 profiles.yml
+.docker/
+.buildx-cache/
+docker-data/
+docker-volumes/
+postgres-data/
 
 # VS Code
 .vscode/
