@@ -65,6 +65,10 @@ dbt/.user.yml
 
 # Docker local overrides
 docker-compose.override.yml
+compose.override.yaml
+compose.override.yml
+.local/
+profiles.yml
 
 # VS Code
 .vscode/
