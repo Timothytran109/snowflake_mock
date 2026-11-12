@@ -2,7 +2,12 @@ version: 2
 
 models:
   - name: stg_stripe__payments
-    description: "Cleaned and deduplicated Stripe payment records; one row per payment_id. Existing transformation is unchanged."
+    description: >-
+      Cleaned Stripe payments; one row per payment_id. Latest _fivetran_synced,
+      then payment_at wins, followed by descending _line (nulls last). Remaining
+      ties use the complete normalized customer_id, email, subscription_id, amount,
+      currency, status tuple descending, nulls last, with explicit UTF-8 collation
+      for strings. Identical normalized rows are interchangeable. No orphan filter.
     columns:
       - name: payment_id
         description: "Source business key; trimmed, unique and required at this model's grain."

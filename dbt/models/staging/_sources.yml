@@ -11,6 +11,11 @@ sources:
     tables:
       - name: mock_stripe_payments
         identifier: MOCK_STRIPE_PAYMENTS
+        description: >-
+          Stripe payment export; payment_id is the business key. Available ordering
+          metadata is _fivetran_synced and _line. The line number is a file/sheet
+          position, not a globally unique row identifier. No file/sheet identifier
+          or unique ingestion row ID is guaranteed by this source contract.
       - name: mock_stripe_customers
         identifier: MOCK_STRIPE_CUSTOMERS
         description: Stripe customer export; customer_id is the business key.

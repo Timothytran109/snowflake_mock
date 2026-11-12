@@ -14,7 +14,8 @@ with source_data as (
         nullif(lower(trim(currency::varchar)), '') as currency,
         nullif(lower(trim(status::varchar)), '') as status,
         nullif(trim(payment_timestamp::varchar), '') as raw_payment_timestamp,
-        _fivetran_synced
+        _fivetran_synced,
+        _line
 
     from {{ source('raw', 'mock_stripe_payments') }}
 
@@ -57,7 +58,8 @@ typed_data as (
             )
         ) as payment_at,
 
-        _fivetran_synced
+        _fivetran_synced,
+        _line
 
     from source_data
 
@@ -80,5 +82,14 @@ qualify row_number() over (
     partition by payment_id
     order by
         _fivetran_synced desc,
-        payment_at desc nulls last
+        payment_at desc nulls last,
+        _line desc nulls last,
+        -- Lines may repeat across files/sheets. Compare every remaining output
+        -- value to resolve conflicts; normalized-identical rows are equivalent.
+        collate(customer_id, 'utf8') desc nulls last,
+        collate(email, 'utf8') desc nulls last,
+        collate(subscription_id, 'utf8') desc nulls last,
+        amount desc nulls last,
+        collate(currency, 'utf8') desc nulls last,
+        collate(status, 'utf8') desc nulls last
 ) = 1

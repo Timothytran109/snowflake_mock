@@ -1,0 +1,97 @@
+Run-006 implementation follow-up: F-06 payment deduplication
+Date: 2026-11-11 (America/Los_Angeles)
+Repository: C:\Projects\work_projects\mock_project
+Baseline: 907ae81254c1fa06d080e5322f4016fceb9e407f
+F-06 changes intentionally remain uncommitted for review.
+
+Finding and source boundary
+- Confirmed F-06: the existing payment window ordered only by sync timestamp
+  and parsed payment timestamp, permitting conflicting rows to tie.
+- Inspected the checked-in source contract and all seven staging models.
+  The contract guarantees _line and _fivetran_synced, with no guaranteed
+  file/sheet identity or unique ingestion row ID. No live metadata was queried.
+- Preserve both existing timestamp ordering expressions, including the sync
+  timestamp's implicit null ordering. Add _line descending/nulls last, then the
+  complete remaining normalized output tuple (customer_id, email,
+  subscription_id, amount, currency, status) descending/nulls last.
+- Strings use explicit UTF-8 collation. The final tuple resolves line collisions
+  without relying on unique line numbers, hashes, or uncontracted metadata.
+  This is a reproducible canonical choice, not a claim of business recency.
+  Normalized-identical duplicates produce identical output.
+- Preserve the nine output columns, existing cleaning/casts, relationship-test
+  severities and downstream orphan handling. _line remains internal to payments.
+
+Files changed for F-06
+- dbt/models/staging/stg_stripe__payments.sql
+- dbt/models/staging/unit_tests.yml
+- dbt/models/staging/_sources.yml (description only)
+- dbt/models/staging/schema.yml (payment description only)
+- dbt/models/staging/README.md
+- This redacted validation record.
+
+Four new dbt unit tests
+1. stripe_payments_preserve_sync_then_payment_timestamp_priority
+2. stripe_payments_tied_timestamps_prefer_highest_line_and_retain_orphans
+3. stripe_payments_repeated_lines_use_complete_normalized_content
+4. stripe_payments_content_winner_is_independent_of_input_order
+Fixtures cover competing timestamps/lines, each of six conflicting content
+fields individually, case-sensitive string ordering, numeric amount ordering,
+null lines and content, normalized-identical duplicates, reversed inputs and
+retention of the documented orphan payment. No real source rows are restored
+or fabricated; these are synthetic unit-test inputs only.
+
+Credential-free parsing
+docker run --rm --network none --entrypoint python --env PYTHONPATH=/opt/airflow/tests --mount "type=bind,source=$($PWD.Path)/airflow/tests,target=/opt/airflow/tests,readonly" --mount "type=bind,source=$($PWD.Path)/dbt,target=/opt/customer360/dbt,readonly" customer360-airflow:3.3.2-python3.12 -m unittest test_container_runtime.ContainerRuntimeTests.test_mounted_dbt_project_parses_without_external_credentials -v
+Result: exit 0; 1 passed. Uses the repository's existing credential-free parse
+test, a temporary dummy profile, isolated target/log directories, and disabled
+anonymous usage statistics. No real profiles, keys or environment files mounted.
+
+The test runs this dbt command (temporary profile path supplied by the test):
+dbt parse --no-partial-parse --profiles-dir <temporary-directory> --project-dir /opt/customer360/dbt --target dev
+
+An additional inline Python check invoked /opt/dbt/bin/dbt with the same parse
+arguments in a separate network-disabled container and inspected its temporary
+manifest. Result: exit 0; Core 1.12.6 / Snowflake adapter 1.12.5; all four payment
+unit tests parsed; all 14 models still routed to CUSTOMER360_TEST.SILVER/GOLD;
+exactly three warning test definitions. Other tests, including Gold, remain
+errors. Parsing does not execute any unit or data tests against Snowflake.
+
+Additional local checks (network-disabled existing runtime image)
+- SQLGlot parsed the rendered model with the Snowflake dialect. Compared its AST
+  with the baseline model exported from Git into an ignored local file: same
+  nine final columns, both original ordering expressions, partition key and all
+  cleaning/casting expressions. Only internal _line projection and tie ordering
+  changed. Result: passed.
+- Compared YAML definitions and file hashes against the pre-commit index export:
+  all six existing staging unit tests and every schema test definition are
+  unchanged; all intermediate and Gold files are byte-for-byte unchanged.
+- Extracted the model's actual window expression and translated it to SQLite.
+  Registered UTF-8 bytewise collation, normalized the synthetic fixture values
+  in Python, and replayed all four fixture sets with 100 seeded input shuffles
+  each. Compared every expected field and row count: 400 checks passed.
+  Also verified that the fourth fixture reverses the third fixture exactly and
+  has the same expected rows. This checks local ranking behavior only; it does
+  not validate Snowflake casts, execution semantics or dbt fixture compilation.
+- A diagnostic attempt to import dbt's internal UnitTestInputFixture class
+  directly encountered a circular-import error. This internal inspection was
+  abandoned; both supported dbt CLI parse invocations passed. No dependencies
+  were changed for that diagnostic.
+
+Repository/configuration checks
+docker compose config --quiet
+Result: exit 0; expanded configuration and environment values were not printed.
+git diff --check
+Result: exit 0; only a pre-existing airflow/requirements.txt LF/CRLF notice.
+git diff --cached --exit-code
+Result: exit 0; no F-06 files staged after the approved F-04/F-05 commit.
+SHA-256 checks: all six earlier audit reports unchanged.
+Unrelated Fivetran/provider working-tree changes retained.
+
+Limits
+- Snowflake unit/data tests executed: ZERO. No dbt build, dbt test or docs
+  generation that could query Snowflake was attempted. The four dbt unit tests
+  require later authorized execution on TEST; offline parsing is not a passing
+  Snowflake test result.
+- No live source contract/type inspection, pipeline triggers, Fivetran, Snowflake
+  or SMTP connections, service recreation, credential edits, key-content reads,
+  push or F-06 commit. Existing images were reused.

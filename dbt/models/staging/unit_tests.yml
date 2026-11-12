@@ -1,6 +1,154 @@
 # Synthetic fixtures exercise transformations independently of current RAW contents.
 version: 2
 unit_tests:
+- name: stripe_payments_preserve_sync_then_payment_timestamp_priority
+  model: stg_stripe__payments
+  given:
+  - input: source('raw', 'mock_stripe_payments')
+    rows:
+    - {_line: 99, _fivetran_synced: '2026-03-01 00:00:00 +00:00', payment_id: pay_sync,
+       customer_id: cus_z, email: z@example.invalid, subscription_id: sub_z, amount: '999',
+       currency: USD, status: succeeded, payment_timestamp: '2026-02-28 12:00:00 +00:00'}
+    - {_line: 1, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_id: pay_sync,
+       customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '1',
+       currency: USD, status: failed, payment_timestamp: '2026-02-01 12:00:00 +00:00'}
+    - {_line: 99, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_id: pay_date,
+       customer_id: cus_z, email: z@example.invalid, subscription_id: sub_z, amount: '999',
+       currency: USD, status: succeeded, payment_timestamp: '2026-02-01 12:00:00 +00:00'}
+    - {_line: 1, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_id: pay_date,
+       customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '1',
+       currency: USD, status: failed, payment_timestamp: '2026-02-28 12:00:00 +00:00'}
+    - {_line: 999, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_id: pay_date,
+       customer_id: cus_z, email: z@example.invalid, subscription_id: sub_z, amount: '999',
+       currency: USD, status: succeeded, payment_timestamp: null}
+  expect:
+    rows:
+    - {payment_id: pay_sync, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a,
+       amount: 1, currency: USD, status: failed, payment_at: '2026-02-01 12:00:00',
+       loaded_at: '2026-03-02 00:00:00 +00:00'}
+    - {payment_id: pay_date, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a,
+       amount: 1, currency: USD, status: failed, payment_at: '2026-02-28 12:00:00',
+       loaded_at: '2026-03-02 00:00:00 +00:00'}
+- name: stripe_payments_tied_timestamps_prefer_highest_line_and_retain_orphans
+  model: stg_stripe__payments
+  given:
+  - input: source('raw', 'mock_stripe_payments')
+    rows:
+    - {_line: 1, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_id: PAY_8003,
+       customer_id: ST_9999, email: z@example.invalid, subscription_id: SUB_9999, amount: '999',
+       currency: USD, status: succeeded, payment_timestamp: '2026-02-28 12:00:00 +00:00'}
+    - {_line: 9, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_id: ' PAY_8003 ',
+       customer_id: ' ST_9003 ', email: ' ORPHAN@EXAMPLE.INVALID ', subscription_id: ' SUB_7003 ',
+       amount: ' $1.00 ', currency: ' usd ', status: ' FAILED ',
+       payment_timestamp: '2026-02-28 12:00:00 +00:00'}
+    - {_line: null, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_id: PAY_8003,
+       customer_id: ST_9999, email: z@example.invalid, subscription_id: SUB_9999, amount: '999',
+       currency: USD, status: succeeded, payment_timestamp: '2026-02-28 12:00:00 +00:00'}
+    # Same normalized output as line 9: either physical row must be equivalent.
+    - {_line: 9, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_id: PAY_8003,
+       customer_id: ST_9003, email: orphan@example.invalid, subscription_id: SUB_7003, amount: '1',
+       currency: USD, status: failed, payment_timestamp: '2026-02-28 12:00:00 +00:00'}
+  expect:
+    rows:
+    - {payment_id: PAY_8003, customer_id: ST_9003, email: orphan@example.invalid, subscription_id: SUB_7003,
+       amount: 1, currency: USD, status: failed, payment_at: '2026-02-28 12:00:00',
+       loaded_at: '2026-03-02 00:00:00 +00:00'}
+- name: stripe_payments_repeated_lines_use_complete_normalized_content
+  model: stg_stripe__payments
+  given:
+  - input: source('raw', 'mock_stripe_payments')
+    # Each pair differs in just one content field: later ordering keys cannot mask an omission.
+    rows:
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_customer, customer_id: cus_Z, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_customer, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_email, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_email, customer_id: cus_a, email: z@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_subscription, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_subscription, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_z, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_amount, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '9', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_amount, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_currency, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: EUR, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_currency, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_status, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_status, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: succeeded}
+    - {_line: null, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_null_line, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: succeeded}
+    - {_line: null, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_null_line, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_null_value, customer_id: cus_a, email: a@example.invalid, subscription_id: null, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_null_value, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+  expect:
+    rows:
+    - {payment_id: pay_customer, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: 10, currency: USD, status: failed}
+    - {payment_id: pay_email, customer_id: cus_a, email: z@example.invalid, subscription_id: sub_a, amount: 10, currency: USD, status: failed}
+    - {payment_id: pay_subscription, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_z, amount: 10, currency: USD, status: failed}
+    - {payment_id: pay_amount, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: 10, currency: USD, status: failed}
+    - {payment_id: pay_currency, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: 10, currency: USD, status: failed}
+    - {payment_id: pay_status, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: 10, currency: USD, status: succeeded}
+    - {payment_id: pay_null_line, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: 10, currency: USD, status: succeeded}
+    - {payment_id: pay_null_value, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: 10, currency: USD, status: failed}
+- name: stripe_payments_content_winner_is_independent_of_input_order
+  model: stg_stripe__payments
+  given:
+  - input: source('raw', 'mock_stripe_payments')
+    # Reverse the repeated-lines fixture, including a last-arriving lower status.
+    rows:
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_null_value, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_null_value, customer_id: cus_a, email: a@example.invalid, subscription_id: null, amount: '10', currency: USD, status: failed}
+    - {_line: null, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_null_line, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: null, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_null_line, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: succeeded}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_status, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: succeeded}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_status, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_currency, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_currency, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: EUR, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_amount, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_amount, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '9', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_subscription, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_z, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_subscription, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_email, customer_id: cus_a, email: z@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_email, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_customer, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+    - {_line: 42, _fivetran_synced: '2026-03-02 00:00:00 +00:00', payment_timestamp: '2026-02-28 12:00:00 +00:00',
+       payment_id: pay_customer, customer_id: cus_Z, email: a@example.invalid, subscription_id: sub_a, amount: '10', currency: USD, status: failed}
+  expect:
+    rows:
+    - {payment_id: pay_customer, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: 10, currency: USD, status: failed}
+    - {payment_id: pay_email, customer_id: cus_a, email: z@example.invalid, subscription_id: sub_a, amount: 10, currency: USD, status: failed}
+    - {payment_id: pay_subscription, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_z, amount: 10, currency: USD, status: failed}
+    - {payment_id: pay_amount, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: 10, currency: USD, status: failed}
+    - {payment_id: pay_currency, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: 10, currency: USD, status: failed}
+    - {payment_id: pay_status, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: 10, currency: USD, status: succeeded}
+    - {payment_id: pay_null_line, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: 10, currency: USD, status: succeeded}
+    - {payment_id: pay_null_value, customer_id: cus_a, email: a@example.invalid, subscription_id: sub_a, amount: 10, currency: USD, status: failed}
 - name: stripe_customers_clean_dates_and_choose_latest
   model: stg_stripe__customers
   given:
