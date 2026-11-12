@@ -29,6 +29,8 @@ x-airflow-common: &airflow-common
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
     AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "30"
     CUSTOMER360_SCHEDULE: ""
+    # Root .env / explicit Compose interpolation only; never default recipients to empty.
+    CUSTOMER360_ALERT_EMAILS: ${CUSTOMER360_ALERT_EMAILS:?Set CUSTOMER360_ALERT_EMAILS in the repository root .env}
     CUSTOMER360_DBT_PROJECT_DIR: /opt/customer360/dbt
     CUSTOMER360_DBT_EXECUTABLE: /opt/dbt/bin/dbt
     CUSTOMER360_DBT_PROFILES_DIR: /opt/airflow/secrets/dbt

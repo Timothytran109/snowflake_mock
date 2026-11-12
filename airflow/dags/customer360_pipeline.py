@@ -56,6 +56,15 @@ SCHEDULE = (
 )  # Explicit manual-only placeholder.
 
 
+def _alert_recipients():
+    """Use the runtime value passed by Compose; never read host dotenv files here."""
+    return [
+        value.strip()
+        for value in os.environ.get("CUSTOMER360_ALERT_EMAILS", "").split(",")
+        if value.strip()
+    ]
+
+
 def failure_notification(context):
     """Do not include exception messages, connection details, or subprocess output."""
     ti = context.get("task_instance")
@@ -66,11 +75,7 @@ def failure_notification(context):
         dag_id,
         task_id,
     )
-    recipients = [
-        x.strip()
-        for x in os.environ.get("CUSTOMER360_ALERT_EMAILS", "").split(",")
-        if x.strip()
-    ]
+    recipients = _alert_recipients()
     if not recipients:
         LOG.error(
             "Failure email not configured; set CUSTOMER360_ALERT_EMAILS and customer360_smtp"
@@ -504,7 +509,7 @@ def _validate_dbt_profile(path):
 def customer360_pipeline():
     @task(multiple_outputs=False)
     def prepare_sync_monitoring():
-        if not os.environ.get("CUSTOMER360_ALERT_EMAILS", "").strip():
+        if not _alert_recipients():
             raise AirflowFailException(
                 "Configure CUSTOMER360_ALERT_EMAILS and customer360_smtp before running the pipeline"
             )

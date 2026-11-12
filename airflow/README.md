@@ -71,7 +71,10 @@ describes [SimpleAuthManager's development scope](https://airflow.apache.org/doc
 Use Docker Desktop in Linux-container mode and current Docker Compose (2.24 or
 newer for optional environment files). Allocate sufficient memory for the stack
 and any other running containers; 8 GB for Docker is a useful starting point.
-Run all commands from the repository root:
+Run all commands from the repository root. First configure `CUSTOMER360_ALERT_EMAILS`
+privately in the ignored root `.env`; Compose requires a nonempty recipient setting
+even when building or starting a local stack. Integration credentials are still
+unnecessary for mocked tests and local initialization:
 
 ```powershell
 Set-Location C:\Projects\work_projects\mock_project
@@ -113,12 +116,19 @@ $env:CUSTOMER360_AIRFLOW_PORT = '8081'
 # $env:CUSTOMER360_KEYS_HOST_DIR = 'C:\private\customer360\keys'
 ```
 
-There are no required host environment variables for an unconfigured local stack.
-`CUSTOMER360_ALERT_EMAILS` and any profile `env_var()` values are required only
-before running the pipeline. Put them in the ignored
-`.local/customer360/runtime.env` (standard `NAME=value` format). All Airflow
-services load that file at container creation; use `docker compose up -d
---force-recreate` after changes. Avoid plain `docker compose config` when runtime
+No host exports are needed when the root `.env` supplies `CUSTOMER360_ALERT_EMAILS`.
+Keep that setting out of `.local/customer360/runtime.env`: values in that file
+cannot satisfy or override the authoritative Compose setting. If recipients are
+configured in both files, the root `.env` wins; an explicit nonempty shell override
+is supported for deployment, while empty overrides fail closed. Missing or empty
+authoritative recipients make `docker compose config` fail with a variable-name-only
+instruction. Whitespace/comma-only lists are additionally rejected by DAG preflight
+before any Fivetran call. The failure callback does not attempt SMTP for such lists.
+
+Other optional runtime variables, including profile `env_var()` values, can use the
+ignored `.local/customer360/runtime.env` (standard `NAME=value` format). All Airflow
+services load that file at container creation; recreate services only when ready to
+apply runtime changes. Avoid plain `docker compose config` when runtime
 secrets are present because it can display expanded environment values; use
 `--quiet` for validation. Do not print `docker inspect` environment payloads.
 
@@ -228,7 +238,7 @@ uses these environment variables (defaults shown):
 - `CUSTOMER360_DBT_PROJECT_DIR=/opt/customer360/dbt`: absolute directory containing `dbt_project.yml`.
 - `CUSTOMER360_DBT_EXECUTABLE=/opt/dbt/bin/dbt`: executable in the isolated dbt environment.
 - `CUSTOMER360_DBT_PROFILES_DIR=/opt/airflow/secrets/dbt`: absolute directory containing a runtime-mounted `profiles.yml`.
-- `CUSTOMER360_ALERT_EMAILS`: required comma-separated operational recipients; configure on workers and callback processors.
+- `CUSTOMER360_ALERT_EMAILS`: required comma-separated operational recipients in the ignored root `.env`; Compose supplies workers and callback processors. Missing/empty values fail Compose validation.
 - `CUSTOMER360_SCHEDULE`: optional cron expression, read at DAG parsing time; default manual-only.
 
 Mount dbt sources read-only where practical. Temporary target and log directories
@@ -309,8 +319,10 @@ definitions are changed by this DAG.
 ### `customer360_smtp`
 
 Configure an SMTP provider connection, including host, port, authentication,
-appropriate TLS settings and `from_email` extra. Set `CUSTOMER360_ALERT_EMAILS` to
-real operational recipients. The preflight task refuses to run without recipients.
+appropriate TLS settings and `from_email` extra. Set `CUSTOMER360_ALERT_EMAILS`
+privately in the ignored root `.env` to operational recipients. Do not put this
+setting in `runtime.env`. Compose rejects missing/empty values, and DAG preflight
+rejects empty parsed recipient lists before ingestion.
 The failure callback emails only the DAG/task identity and a direction to inspect
 Airflow logs, excluding exception payloads and business data. A delivery failure is
 logged without concealing the original task failure. Test SMTP delivery separately
@@ -362,6 +374,14 @@ The tests use a real Airflow DagBag and serializer, and mock only external I/O.
 They cover imports without secret/network access, exact dependencies, operational
 defaults, sync freshness/failures, destination checks, RAW checks, dbt warning/error
 handling, routing guards, artifact isolation and process cleanup.
+
+Alert configuration precedence tests evaluate the real Compose file against
+temporary dotenv files containing synthetic addresses only. They do not load the
+repository's private `.env`/`runtime.env`, start services, or call integrations:
+
+```powershell
+python -m unittest discover -s docker/tests -p test_compose_alert_configuration.py -v
+```
 
 From the repository root in PowerShell, with Docker Desktop running, initialize
 once and use the reusable validation script. It builds when `-Build` is supplied,

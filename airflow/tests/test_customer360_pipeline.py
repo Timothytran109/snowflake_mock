@@ -177,6 +177,38 @@ class DagTests(unittest.TestCase):
         self.assertIn("could not be delivered", " ".join(captured.output))
         self.assertNotIn("synthetic-sensitive-payload", " ".join(captured.output))
 
+    def test_missing_recipients_block_preflight_before_fivetran(self):
+        prepare = next(
+            task.python_callable
+            for task in pipeline.pipeline.tasks
+            if task.task_id.startswith("prepare_")
+        )
+        for value in ("", "   ", ", ,"):
+            with (
+                self.subTest(case="empty recipient list"),
+                patch.dict(os.environ, {"CUSTOMER360_ALERT_EMAILS": value}),
+                patch.object(pipeline, "_connection") as connection,
+                self.assertRaisesRegex(pipeline.AirflowFailException, "ALERT_EMAILS"),
+            ):
+                prepare()
+            connection.assert_not_called()
+
+    def test_configured_recipients_are_normalized(self):
+        with patch.dict(
+            os.environ, {"CUSTOMER360_ALERT_EMAILS": " alerts@example.invalid, "}
+        ):
+            self.assertEqual(pipeline._alert_recipients(), ["alerts@example.invalid"])
+
+    def test_missing_recipients_never_attempt_smtp(self):
+        with (
+            patch.dict(os.environ, {"CUSTOMER360_ALERT_EMAILS": ", ,"}),
+            patch("airflow.providers.smtp.hooks.smtp.SmtpHook") as smtp,
+            self.assertLogs(pipeline.LOG, level="ERROR") as captured,
+        ):
+            pipeline.failure_notification({})
+        smtp.assert_not_called()
+        self.assertIn("Failure email not configured", " ".join(captured.output))
+
 
 class FivetranTests(unittest.TestCase):
     boundary = "2026-11-10T12:00:00+00:00"
