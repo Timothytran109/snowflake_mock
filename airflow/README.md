@@ -142,6 +142,13 @@ The Airflow services share these read-only bind mounts:
 - `.local/customer360/dbt` (or `CUSTOMER360_DBT_PROFILES_HOST_DIR`) -> `/opt/airflow/secrets/dbt`
 - `.local/customer360/keys` (or `CUSTOMER360_KEYS_HOST_DIR`) -> `/opt/airflow/secrets/keys`
 
+- `keys/snowflake` -> `/opt/airflow/secrets/snowflake`
+
+The Snowflake key directory must exist before starting the containers. All Airflow
+services inherit this read-only mount, including the LocalExecutor scheduler.
+Reference `/opt/airflow/secrets/snowflake/<filename>` for keys in that directory.
+Keys are mounted at runtime and are never copied into the image.
+
 Named volumes `customer360-local_postgres-data` and
 `customer360-local_airflow-logs` retain metadata and shared task logs. dbt writes
 ad-hoc CLI artifacts into `/tmp`; the DAG creates a private directory per attempt.
@@ -158,14 +165,20 @@ role, plus SMTP authentication and sender details. The UI stores connection
 secrets encrypted with the mounted Fernet key.
 
 Place a Linux-compatible `profiles.yml` in the selected dbt profile directory.
-Use profile `customer360`, target `dev`, `CUSTOMER360_TEST`, `SILVER`, and
-`C360_DBT_ROLE` (or another dedicated transformation role), never `ACCOUNTADMIN`.
-If using key authentication, place the key in the selected key directory and
-reference `/opt/airflow/secrets/keys/<filename>` in the profile/connection, not a
-Windows host path. Use runtime `env_var()` values for sensitive profile fields
-where practical. The existing DAG's profile and manifest guards still reject
-production destinations and administrative roles. Azure credentials are not needed
-by this local setup; a future secret backend must be configured separately.
+Use profile `customer360`, target `dev`, type `snowflake`, `CUSTOMER360_TEST.SILVER`,
+user `SVC_DBT_TEST` and role `C360_DBT_ROLE`. Key-pair authentication configuration
+is required: the default dbt `private_key_path` is
+`/opt/airflow/secrets/snowflake/dbt_rsa_key.p8`, never a Windows host path. A different
+service identity, transformation role or mounted path requires deployment-owner
+approval and matching changes to the expected `CUSTOMER360_DBT_USER`,
+`CUSTOMER360_DBT_ROLE` or `CUSTOMER360_DBT_PRIVATE_KEY_PATH` policy and the profile.
+Changing only the profile to another dedicated role is rejected; `ACCOUNTADMIN`
+is always rejected. See the approved TEST deployment configuration below.
+Use runtime secrets for key passphrases. The DAG checks identities, routing,
+authentication configuration and mounted-key metadata; RSA provisioning,
+public-key registration, live authentication and effective privileges are separate
+deployment checks. Azure credentials are not needed by this local setup; a future
+secret backend must be configured separately.
 
 ### Shutdown and restart without removing data
 
@@ -276,9 +289,26 @@ logged or placed in XCom.
 ### `customer360_snowflake_raw`
 
 Use connection type `snowflake`, schema `RAW`, and extra fields `database` set to
-`CUSTOMER360_TEST`, plus the appropriate `account`, `warehouse`, and dedicated
-read-only `role`. Configure authentication using the provider's supported runtime
-credential/key mechanism. Do not use an administrative role.
+`CUSTOMER360_TEST`, plus the appropriate `account` and `warehouse`. Login must be
+`SVC_AIRFLOW_TEST`; the `role` extra must be `C360_AIRFLOW_ROLE`. Configure
+`private_key_file` as `/opt/airflow/secrets/snowflake/airflow_rsa_key.p8` and use
+`authenticator=snowflake_jwt` (or the provider's default Snowflake authenticator
+with that key). The file must match the approved deployment path, exist, be
+nonempty and readable. Inline keys, token/OAuth and browser/interactive mechanisms
+are rejected. The connection password field, if needed, is only the encrypted
+key's passphrase; password-only authentication cannot pass preflight.
+
+Connection preflight validates identity, routing and key configuration before
+opening Snowflake. After connection, `CURRENT_USER()` and `CURRENT_ROLE()` must
+match the approved service identity before any RAW table scan. No administrative
+role or other read-only role can substitute in the primary-role identity check.
+`CURRENT_ROLE()` identifies the primary role; it does not establish effective
+privileges. The DAG does not disable or inspect secondary roles. Before deployment,
+the owner must verify the service users' secondary-role defaults/session behavior,
+role inheritance, PUBLIC access and object grants, then approve a least-privilege
+policy for both RAW and dbt. This verification remains outstanding. If the policy
+requires only the named role to contribute privileges, the deployment must enforce
+that secondary-role policy and verify it in an authorized live session.
 
 The role needs warehouse USAGE, database/schema USAGE and SELECT on these tables:
 
@@ -291,7 +321,7 @@ The role needs warehouse USAGE, database/schema USAGE and SELECT on these tables
 - `CUSTOMER360_TEST.RAW.MOCK_STRIPE_PAYMENTS`
 
 After all monitored syncs succeed, validation verifies the actual Snowflake session
-database, schema and non-admin role. It checks table visibility through
+database, schema, service user and exact role. It checks table visibility through
 `information_schema.tables` and uses `select 1 ... limit 1` per table to verify
 nonempty data without logging business records. Missing or empty tables block dbt.
 No grants or source modifications are performed by the DAG.
@@ -299,10 +329,53 @@ No grants or source modifications are performed by the DAG.
 ### dbt runtime profile
 
 The separately mounted profile must contain `customer360.outputs.dev`, using
-database `CUSTOMER360_TEST`, schema `SILVER` and a dedicated transformation role
-(the existing project uses `C360_DBT_ROLE`). Credentials remain in runtime secrets.
-Routing/role fields can be literal values or use dbt `env_var()` expressions.
+type `snowflake`, database `CUSTOMER360_TEST`, schema `SILVER`, user `SVC_DBT_TEST`
+and role `C360_DBT_ROLE`. Its `private_key_path` must match the approved deployment
+path `/opt/airflow/secrets/snowflake/dbt_rsa_key.p8`, and the mounted file must exist,
+be nonempty and readable. Identity, routing and key-path fields can use dbt
+`env_var()` expressions. The allowed authenticator values are `snowflake_jwt` or
+`snowflake`; omission uses the connector's key-based default. Password fields,
+inline private keys, tokens/OAuth and browser/interactive authenticators are
+rejected, even if a key is also present. Encrypted keys may use the dbt-specific
+`private_key_passphrase` field, delivered through an approved runtime secret.
+The guard never renders a passphrase or reads key contents.
 The existing project macro routes marts to `CUSTOMER360_TEST.GOLD`.
+
+### Approved TEST service deployment configuration
+
+The shared Compose environment defines these non-secret expectations with TEST
+defaults. The DAG resolves the same defaults at task execution outside Compose:
+
+- `CUSTOMER360_RAW_USER=SVC_AIRFLOW_TEST`
+- `CUSTOMER360_RAW_ROLE=C360_AIRFLOW_ROLE`
+- `CUSTOMER360_RAW_PRIVATE_KEY_PATH=/opt/airflow/secrets/snowflake/airflow_rsa_key.p8`
+- `CUSTOMER360_DBT_USER=SVC_DBT_TEST`
+- `CUSTOMER360_DBT_ROLE=C360_DBT_ROLE`
+- `CUSTOMER360_DBT_PRIVATE_KEY_PATH=/opt/airflow/secrets/snowflake/dbt_rsa_key.p8`
+
+Only deployment owners should change these expected identities or approved paths,
+after review, through the ignored root `.env`/deployment environment. An override
+must still be a valid service identifier and non-admin role; it does not relax
+the fixed `CUSTOMER360_TEST.RAW` and `CUSTOMER360_TEST.SILVER` guards. Matching the
+expected identity in both the policy and the Connection/profile is mandatory.
+Changing a Connection alone does not change its approved identity.
+
+The DAG enforces approved service identities, routing, authentication configuration
+and mounted-key metadata (approved path, existence, nonempty file and readability).
+It never reads private-key contents. Deployment owners must separately verify:
+
+- RSA key provisioning and algorithm, protected key storage, and matching public-key
+  registration for the approved service users.
+- Live key-pair authentication and actual identity through an explicitly authorized
+  deployment test.
+- Effective privileges, including role inheritance, PUBLIC grants and secondary-role
+  state for both service users; a matching primary role alone does not prove least
+  privilege.
+
+Mount private keys read-only; do not copy them into images or tracked profiles.
+No key rotation, Connection edit, profile edit, live authentication or effective-
+privilege check is performed by offline validation. These deployment checks remain
+outstanding and are not certified by the mocked tests or profile metadata guard.
 
 The task validates the profile, runs `dbt parse --no-partial-parse`, and checks
 manifest source/model destinations and test severity before building. It then runs
@@ -374,6 +447,23 @@ The tests use a real Airflow DagBag and serializer, and mock only external I/O.
 They cover imports without secret/network access, exact dependencies, operational
 defaults, sync freshness/failures, destination checks, RAW checks, dbt warning/error
 handling, routing guards, artifact isolation and process cleanup.
+
+Run Ruff with this repository's `pyproject.toml` explicitly mounted. Otherwise the
+Airflow development image can discover its own parent configuration, producing
+different diagnostics. Windows bind mounts can expose these modules as mode
+`0777`, although Git stores them as non-executable `100644` Python modules; that
+does not make them standalone executable scripts requiring shebangs.
+
+```powershell
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/ruff --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" --mount "type=bind,source=$($PWD.Path)/pyproject.toml,target=/opt/customer360/pyproject.toml,readonly" customer360-airflow-dev:3.3.2-python3.12 check --no-cache --config /opt/customer360/pyproject.toml /opt/airflow/source/dags/customer360_pipeline.py /opt/airflow/source/tests/test_customer360_pipeline.py
+```
+
+The six outer exception boundaries deliberately redact arbitrary SDK, driver,
+profile/template and subprocess/artifact errors, or preserve the original task
+failure if notification fails. Each has a reasoned, line-scoped `BLE001` annotation;
+no rule is globally disabled. Adding `--extend-select BLE001` to the command above
+also checks those documented exceptions explicitly. Existing `AirflowException`
+handling still preserves intentional task failure and retry behavior.
 
 Alert configuration precedence tests evaluate the real Compose file against
 temporary dotenv files containing synthetic addresses only. They do not load the

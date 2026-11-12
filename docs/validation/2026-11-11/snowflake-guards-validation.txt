@@ -1,0 +1,114 @@
+Run-005 follow-up: F-04/F-05 guard validation
+Date: 2026-11-11 (America/Los_Angeles)
+Repository: C:\Projects\work_projects\mock_project
+HEAD retained: 041ee2750e0043174a24c27b17ed796752a63567
+Shell: Windows PowerShell; Docker Desktop Linux containers.
+
+Scope of this follow-up diff
+- airflow/dags/customer360_pipeline.py: six line-scoped BLE001 annotations
+  explaining intentional outer redaction/notification exception boundaries.
+  No exception-handling behavior or Fivetran behavior changed.
+- airflow/tests/test_customer360_pipeline.py: cursor fixture accepts schema;
+  three direct wrong-schema tests added for RAW configuration, actual session,
+  and dbt profile, asserting rejection before connection/table reads/subprocess.
+- airflow/README.md: reconcile initial setup with identity/key-path policy;
+  clarify configuration/metadata enforcement versus deployment verification;
+  document outstanding secondary-role/effective-privilege checks and Ruff setup.
+- This execution record.
+Earlier uncommitted identity and Fivetran changes are preserved. No audit edited.
+No global Ruff rule changes, shebang additions, or executable-bit changes made.
+
+1. Reproduce the reported eight Ruff diagnostics BEFORE annotations
+
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/ruff --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" customer360-airflow-dev:3.3.2-python3.12 check --no-cache /opt/airflow/source/dags/customer360_pipeline.py /opt/airflow/source/tests/test_customer360_pipeline.py
+Result: exit 1; exactly two EXE002 and six BLE001 diagnostics.
+This invocation did not mount or explicitly select the repository configuration.
+
+An initial attempt to select the project configuration renamed the mounted file:
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/ruff --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" --mount "type=bind,source=$($PWD.Path)/pyproject.toml,target=/opt/customer360/repository-pyproject.toml,readonly" customer360-airflow-dev:3.3.2-python3.12 check --no-cache --config /opt/customer360/repository-pyproject.toml /opt/airflow/source/dags/customer360_pipeline.py /opt/airflow/source/tests/test_customer360_pipeline.py
+Result: exit 1; Ruff treated the renamed TOML as a standalone configuration and
+rejected its [tool.ruff] table (unknown field 'tool'). Corrected the mount's
+basename to pyproject.toml; no source/configuration rule change was required.
+
+Corrected project-config invocation, still BEFORE annotations:
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/ruff --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" --mount "type=bind,source=$($PWD.Path)/pyproject.toml,target=/opt/customer360/pyproject.toml,readonly" customer360-airflow-dev:3.3.2-python3.12 check --no-cache --config /opt/customer360/pyproject.toml /opt/airflow/source/dags/customer360_pipeline.py /opt/airflow/source/tests/test_customer360_pipeline.py
+Result: exit 0; All checks passed.
+The eight diagnostics do not reproduce with the intended repository rules.
+The unchanged project selects E/F/I/B/UP/SIM (ignoring E501); EXE002/BLE001 are
+not selected. Scoped annotations now document the six intentional catches and
+also allow an explicit BLE001 check, without globally disabling any rule.
+
+2. Verify EXE002 file-mode discrepancy
+
+git ls-files --stage -- airflow/dags/customer360_pipeline.py airflow/tests/test_customer360_pipeline.py
+Result: both source modules are stored as non-executable mode 100644.
+
+docker run --rm --network none --entrypoint python --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" customer360-airflow-dev:3.3.2-python3.12 -c "from pathlib import Path; import stat; print('DAG bind-mount mode:',oct(stat.S_IMODE(Path('/opt/airflow/source/dags/customer360_pipeline.py').stat().st_mode))); print('Test bind-mount mode:',oct(stat.S_IMODE(Path('/opt/airflow/source/tests/test_customer360_pipeline.py').stat().st_mode)))"
+Result: both Windows bind-mounted modules appear as mode 0o777 in Docker.
+They are imported Python modules, not executable entry points. No shebang or
+permission workaround was applied to satisfy an unrelated rule configuration.
+
+3. Final mocked DAG suite
+
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/python --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" customer360-airflow-dev:3.3.2-python3.12 -m pytest /opt/airflow/source/tests/test_customer360_pipeline.py -q -p no:cacheprovider
+Result: exit 0; 43 passed in 16.40s. Includes imports/serialization and the three
+new schema rejection tests:
+- RawTests.test_wrong_configured_raw_schema_blocks_before_opening_snowflake
+- RawTests.test_wrong_actual_session_schema_blocks_before_table_reads
+- DbtTests.test_wrong_dbt_profile_schema_blocks_before_dbt_subprocess
+These use matching synthetic identities and valid metadata fixtures so that
+the schema is the rejected field. No real credentials or key contents read.
+
+4. Compose tests and quiet configuration validation
+
+python -m unittest discover -s docker/tests -p test_compose_alert_configuration.py -v
+Result: exit 0; 5 passed in 3.044s. Real Compose CLI, isolated synthetic dotenv
+fixtures; expanded configuration captured in memory and never printed.
+
+docker compose config --quiet
+Result: exit 0; no expanded environment values displayed.
+
+5. Final Ruff checks using the intended project configuration
+
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/ruff --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" --mount "type=bind,source=$($PWD.Path)/pyproject.toml,target=/opt/customer360/pyproject.toml,readonly" --mount "type=bind,source=$($PWD.Path)/docker/tests,target=/opt/customer360/compose-tests,readonly" customer360-airflow-dev:3.3.2-python3.12 check --no-cache --config /opt/customer360/pyproject.toml /opt/airflow/source/dags/customer360_pipeline.py /opt/airflow/source/tests /opt/customer360/compose-tests
+Result: exit 0; All checks passed for the DAG, both Airflow test modules, and
+the Compose configuration test.
+
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/ruff --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" --mount "type=bind,source=$($PWD.Path)/pyproject.toml,target=/opt/customer360/pyproject.toml,readonly" customer360-airflow-dev:3.3.2-python3.12 check --no-cache --config /opt/customer360/pyproject.toml --extend-select BLE001 /opt/airflow/source/dags/customer360_pipeline.py /opt/airflow/source/tests/test_customer360_pipeline.py
+Result: exit 0; All checks passed with BLE001 explicitly enabled in addition
+to project rules. The six justified exceptions are line-scoped.
+
+git diff --check
+Result: exit 0; only working-copy LF/CRLF notices.
+
+Remaining failures and validation boundary
+- No remaining failures under the intended project Ruff configuration or the
+  mocked/Compose suites. A control run without the repository configuration,
+  after annotations, still exits 1 with two EXE002 bind-mount mode diagnostics
+  and zero BLE001 diagnostics. This is not the documented project lint command.
+- The DAG enforces approved identities, routing, authentication configuration,
+  and approved mounted-key path/existence/size/readability metadata.
+- RSA provisioning/algorithm verification, public-key registration, live key-pair
+  authentication and effective privileges remain deployment checks. No private
+  key contents were inspected to satisfy this audit.
+- CURRENT_ROLE() checks primary-role identity only. Secondary-role state,
+  inherited and PUBLIC grants, and effective least privilege for both service
+  users remain outstanding deployment verification. Runtime does not disable
+  or inspect secondary roles; no assurance of exclusive named-role privileges.
+- No live Snowflake, Fivetran or SMTP checks, DAG triggers, service recreation,
+  credential changes, commit or push were performed. Existing images were used.
+- All implementation changes remain uncommitted; prior audits remain unchanged.
+
+Run-006 approved commit preparation (2026-11-11)
+Only F-04/F-05 hunks were staged. Unrelated provider/Fivetran work remains in the
+working tree. The read-only Snowflake key mount is included because the approved
+key-path guards depend on it; no credentials or key contents were staged.
+
+git checkout-index --prefix=.local/customer360/f04-f05-index-review/ -a
+python -m unittest discover -s .local/customer360/f04-f05-index-review/docker/tests -p test_compose_alert_configuration.py -v
+Result: exit 0; 5 passed in 2.782s against the staged snapshot.
+
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/python --mount "type=bind,source=$($PWD.Path)/.local/customer360/f04-f05-index-review/airflow,target=/opt/airflow/source,readonly" customer360-airflow-dev:3.3.2-python3.12 -m pytest /opt/airflow/source/tests/test_customer360_pipeline.py -q -p no:cacheprovider
+Result: exit 0; 37 passed in 16.18s against the staged snapshot. The six additional
+working-tree Fivetran tests are deliberately excluded from this scoped commit.
+No live integrations or running services were contacted by the mocked suite.

@@ -51,6 +51,14 @@ ADMIN_ROLES = {
     "USERADMIN",
     "PUBLIC",
 }
+SNOWFLAKE_DEPLOYMENT_DEFAULTS = {
+    "RAW_USER": "SVC_AIRFLOW_TEST",
+    "RAW_ROLE": "C360_AIRFLOW_ROLE",
+    "RAW_PRIVATE_KEY_PATH": "/opt/airflow/secrets/snowflake/airflow_rsa_key.p8",
+    "DBT_USER": "SVC_DBT_TEST",
+    "DBT_ROLE": "C360_DBT_ROLE",
+    "DBT_PRIVATE_KEY_PATH": "/opt/airflow/secrets/snowflake/dbt_rsa_key.p8",
+}
 SCHEDULE = (
     os.environ.get("CUSTOMER360_SCHEDULE") or None
 )  # Explicit manual-only placeholder.
@@ -90,7 +98,7 @@ def failure_notification(context):
                 subject="Customer360 pipeline task failed",
                 html_content=f"DAG {escape(dag_id)}, task {escape(task_id)} failed. Check Airflow task logs.",
             )
-    except Exception:
+    except Exception:  # noqa: BLE001 -- Delivery errors must not replace the original task failure.
         LOG.error(
             "Customer360 failure notification could not be delivered; inspect SMTP configuration"
         )
@@ -126,7 +134,7 @@ def _connection():
         ):
             raise ValueError
         return connection, ids, destination_id
-    except Exception:
+    except Exception:  # noqa: BLE001 -- Secret-backend errors must not expose connection details.
         raise AirflowFailException(
             "Configure customer360_fivetran credentials, connection_ids and destination_id"
         ) from None
@@ -225,17 +233,112 @@ def _sync_finished(details, not_before):
     )
 
 
+def _snowflake_policy(layer):
+    """Deployment-owned expectations; defaults are TEST service identities only."""
+    values = {
+        field: os.environ.get(
+            f"CUSTOMER360_{layer}_{field}",
+            SNOWFLAKE_DEPLOYMENT_DEFAULTS[f"{layer}_{field}"],
+        )
+        for field in ("USER", "ROLE", "PRIVATE_KEY_PATH")
+    }
+    if (
+        any(
+            not re.fullmatch(r"[A-Z_][A-Z0-9_]*", values[field])
+            for field in ("USER", "ROLE")
+        )
+        or values["ROLE"] in ADMIN_ROLES
+        or not values["PRIVATE_KEY_PATH"]
+        or not Path(values["PRIVATE_KEY_PATH"]).is_absolute()
+    ):
+        raise AirflowFailException("Invalid Snowflake service deployment policy")
+    return values
+
+
+def _require_rsa_key_path(value, expected):
+    """Validate the approved mounted file using metadata only; never read its bytes."""
+    if not isinstance(value, str) or not value or not Path(value).is_absolute():
+        raise ValueError
+    path = Path(value)
+    if (
+        path != Path(expected)
+        or not path.is_file()
+        or path.stat().st_size == 0
+        or not os.access(path, os.R_OK)
+    ):
+        raise ValueError
+
+
+def _require_key_authentication(values):
+    authenticator = values.get("authenticator")
+    if authenticator is not None and (
+        not isinstance(authenticator, str)
+        or authenticator.lower() not in {"snowflake", "snowflake_jwt"}
+    ):
+        raise ValueError
+    for field in (
+        "token",
+        "oauth_client_id",
+        "oauth_client_secret",
+        "refresh_token",
+        "workload_identity_provider",
+        "private_key",
+        "private_key_content",
+    ):
+        if values.get(field) not in (None, ""):
+            raise ValueError
+
+
+def _validate_raw_connection(config):
+    """Reject a wrong identity or alternative authentication before opening Snowflake."""
+    try:
+        policy = _snowflake_policy("RAW")
+        extra = dict(config.extra_dejson)
+        # Do not allow legacy aliases to override the fields validated below.
+        if any(
+            f"extra__snowflake__{field}" in extra
+            for field in (
+                "database",
+                "role",
+                "private_key_file",
+                "private_key_content",
+                "authenticator",
+                "token",
+                "refresh_token",
+            )
+        ):
+            raise ValueError
+        if (
+            extra.get("database", "").upper() != DATABASE
+            or (config.schema or "").upper() != RAW_SCHEMA
+            or (config.login or "").upper() != policy["USER"]
+            or extra.get("role", "").upper() != policy["ROLE"]
+        ):
+            raise ValueError
+        _require_key_authentication(extra)
+        _require_rsa_key_path(extra.get("private_key_file"), policy["PRIVATE_KEY_PATH"])
+        # The provider may use Connection.password only as the mounted key's passphrase.
+        return policy
+    except Exception:  # noqa: BLE001 -- Malformed secret-backed config must become a redacted failure.
+        raise AirflowFailException(
+            "Snowflake RAW connection must use CUSTOMER360_TEST.RAW, the approved service identity, and its mounted RSA key"
+        ) from None
+
+
 def _validate_raw_tables(cursor):
-    cursor.execute("select current_database(), current_schema(), current_role()")
-    database, schema, role = cursor.fetchone()
+    policy = _snowflake_policy("RAW")
+    cursor.execute(
+        "select current_database(), current_schema(), current_user(), current_role()"
+    )
+    database, schema, user, role = cursor.fetchone()
     if (
         database != DATABASE
         or schema != RAW_SCHEMA
-        or not role
-        or role.upper() in ADMIN_ROLES
+        or user != policy["USER"]
+        or role != policy["ROLE"]
     ):
         raise AirflowFailException(
-            "RAW validation requires CUSTOMER360_TEST.RAW and a dedicated non-admin role"
+            "RAW validation requires CUSTOMER360_TEST.RAW and the approved service user and role"
         )
     cursor.execute(
         "select table_name from CUSTOMER360_TEST.information_schema.tables where table_schema = %s",
@@ -453,12 +556,13 @@ def _build_dbt():
 
 
 def _validate_dbt_profile(path):
-    """Inspect only routing/role fields; never render or log authentication fields."""
+    """Validate routing, service identity and key-auth configuration without reading keys."""
     import yaml
     from jinja2 import Environment, StrictUndefined
 
     try:
         output = yaml.safe_load(path.read_text())["customer360"]["outputs"]["dev"]
+        policy = _snowflake_policy("DBT")
         renderer = Environment(undefined=StrictUndefined)
 
         def env_var(name, default=None):
@@ -470,18 +574,28 @@ def _validate_dbt_profile(path):
         renderer.globals["env_var"] = env_var
         values = {
             key: renderer.from_string(str(output[key])).render().upper()
-            for key in ("database", "schema", "role")
+            for key in ("database", "schema", "user", "role")
         }
         if (
             values["database"] != DATABASE
             or values["schema"] != "SILVER"
-            or not values["role"]
-            or values["role"] in ADMIN_ROLES
+            or values["user"] != policy["USER"]
+            or values["role"] != policy["ROLE"]
+            or output.get("type") != "snowflake"
+            or output.get("password") not in (None, "")
         ):
             raise ValueError
-    except Exception:
+        auth = dict(output)
+        if output.get("authenticator") is not None:
+            auth["authenticator"] = renderer.from_string(
+                str(output["authenticator"])
+            ).render()
+        _require_key_authentication(auth)
+        key_path = renderer.from_string(str(output["private_key_path"])).render()
+        _require_rsa_key_path(key_path, policy["PRIVATE_KEY_PATH"])
+    except Exception:  # noqa: BLE001 -- YAML/template errors can contain secret-backed profile text.
         raise AirflowFailException(
-            "dbt customer360/dev must use CUSTOMER360_TEST.SILVER and a dedicated non-admin role"
+            "dbt customer360/dev must use CUSTOMER360_TEST.SILVER, the approved service identity, and its mounted RSA key; password and interactive authentication are disallowed"
         ) from None
 
 
@@ -570,17 +684,12 @@ def customer360_pipeline():
             from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
 
             config = Connection.get(SNOWFLAKE_CONN_ID)
-            if (
-                config.extra_dejson.get("database", "").upper() != DATABASE
-                or (config.schema or "").upper() != RAW_SCHEMA
-            ):
-                raise AirflowFailException(
-                    "Configure customer360_snowflake_raw for CUSTOMER360_TEST.RAW"
-                )
+            policy = _validate_raw_connection(config)
             hook = SnowflakeHook(
                 snowflake_conn_id=SNOWFLAKE_CONN_ID,
                 database=DATABASE,
                 schema=RAW_SCHEMA,
+                role=policy["ROLE"],
                 session_parameters={
                     "QUERY_TAG": "customer360_raw_validation",
                     "STATEMENT_TIMEOUT_IN_SECONDS": 60,
@@ -593,7 +702,7 @@ def customer360_pipeline():
                 return _validate_raw_tables(cursor)
         except AirflowException:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 -- Driver errors may contain credentials; redact before retry.
             raise AirflowException(
                 "Snowflake RAW validation failed; check connection permissions and availability"
             ) from None
@@ -610,7 +719,7 @@ def customer360_pipeline():
             return _build_dbt()
         except AirflowException:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 -- Unexpected profile/artifact errors must not expose secrets.
             raise AirflowException(
                 "dbt execution/artifact validation failed; verify executable, mounts and runtime credentials"
             ) from None

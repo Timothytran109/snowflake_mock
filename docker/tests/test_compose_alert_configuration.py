@@ -113,6 +113,24 @@ class ComposeAlertConfigurationTests(unittest.TestCase):
             self.assertIn("CUSTOMER360_ALERT_EMAILS", error)
             self.assertNotIn("runtime@example.invalid", error)
 
+    def test_test_service_policy_defaults_are_explicit_for_all_airflow_services(self):
+        code, config, _ = self.resolve("root@example.invalid")
+        self.assertEqual(code, 0, "Synthetic Compose fixture did not resolve")
+        defaults = {
+            "CUSTOMER360_RAW_USER": "SVC_AIRFLOW_TEST",
+            "CUSTOMER360_RAW_ROLE": "C360_AIRFLOW_ROLE",
+            "CUSTOMER360_RAW_PRIVATE_KEY_PATH": "/opt/airflow/secrets/snowflake/airflow_rsa_key.p8",
+            "CUSTOMER360_DBT_USER": "SVC_DBT_TEST",
+            "CUSTOMER360_DBT_ROLE": "C360_DBT_ROLE",
+            "CUSTOMER360_DBT_PRIVATE_KEY_PATH": "/opt/airflow/secrets/snowflake/dbt_rsa_key.p8",
+        }
+        for service in self.airflow_services(config):
+            for name, expected in defaults.items():
+                self.assertTrue(
+                    config["services"][service]["environment"].get(name) == expected,
+                    "TEST service deployment defaults were not preserved",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

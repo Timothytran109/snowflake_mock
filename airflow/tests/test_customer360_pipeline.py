@@ -324,14 +324,16 @@ class RawTests(unittest.TestCase):
         *,
         missing=False,
         empty=False,
-        role="C360_RAW_READ_ROLE",
+        role="C360_AIRFLOW_ROLE",
+        user="SVC_AIRFLOW_TEST",
         database="CUSTOMER360_TEST",
+        schema="RAW",
     ):
         cursor = Mock()
         cursor.fetchall.return_value = (
             [] if missing else [(t,) for t in pipeline.RAW_TABLES]
         )
-        cursor.fetchone.side_effect = [(database, "RAW", role)] + (
+        cursor.fetchone.side_effect = [(database, schema, user, role)] + (
             [None] if empty else [(1,)] * 7
         )
         return cursor
@@ -342,12 +344,16 @@ class RawTests(unittest.TestCase):
         queries = [call.args[0] for call in cursor.execute.call_args_list]
         self.assertEqual(sum(q.startswith("select 1") for q in queries), 7)
         self.assertTrue(all(q.startswith("select") for q in queries))
+        self.assertIn("current_user()", queries[0])
+        self.assertIn("current_role()", queries[0])
 
     def test_missing_empty_admin_and_production_fail(self):
         for kwargs in (
             {"missing": True},
             {"empty": True},
             {"role": "ACCOUNTADMIN"},
+            {"role": "OTHER_READ_ROLE"},
+            {"user": "PERSONAL_USER"},
             {"database": "CUSTOMER360_PROD"},
         ):
             with (
@@ -356,8 +362,154 @@ class RawTests(unittest.TestCase):
             ):
                 pipeline._validate_raw_tables(self.cursor(**kwargs))
 
+    def test_wrong_session_identity_blocks_before_table_reads(self):
+        for change in ({"user": "PERSONAL_USER"}, {"role": "OTHER_READ_ROLE"}):
+            cursor = self.cursor(**change)
+            with self.assertRaises(pipeline.AirflowFailException):
+                pipeline._validate_raw_tables(cursor)
+            self.assertEqual(cursor.execute.call_count, 1)
+            cursor.fetchall.assert_not_called()
+
+    def test_wrong_actual_session_schema_blocks_before_table_reads(self):
+        cursor = self.cursor(schema="GOLD")
+        with self.assertRaises(pipeline.AirflowFailException):
+            pipeline._validate_raw_tables(cursor)
+        self.assertEqual(cursor.execute.call_count, 1)
+        cursor.fetchall.assert_not_called()
+
+    def test_wrong_configured_raw_schema_blocks_before_opening_snowflake(self):
+        with tempfile.TemporaryDirectory() as directory:
+            key = Path(directory) / "synthetic.p8"
+            key.write_text("public metadata-only test fixture")
+            config = SimpleNamespace(
+                login="SVC_AIRFLOW_TEST",
+                schema="GOLD",
+                extra_dejson={
+                    "database": "CUSTOMER360_TEST",
+                    "role": "C360_AIRFLOW_ROLE",
+                    "private_key_file": str(key),
+                    "authenticator": "snowflake_jwt",
+                },
+            )
+            validate = pipeline.pipeline.get_task("validate_raw").python_callable
+            with (
+                patch.dict(os.environ, {"CUSTOMER360_RAW_PRIVATE_KEY_PATH": str(key)}),
+                patch.object(pipeline.Connection, "get", return_value=config),
+                patch(
+                    "airflow.providers.snowflake.hooks.snowflake.SnowflakeHook"
+                ) as hook,
+                self.assertRaises(pipeline.AirflowFailException),
+            ):
+                validate([{"status": "success"}])
+            hook.assert_not_called()
+
+    def test_connection_requires_approved_identity_and_mounted_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            key = Path(directory) / "synthetic.p8"
+            key.write_text("public metadata-only test fixture")
+            extra = {
+                "database": "CUSTOMER360_TEST",
+                "role": "C360_AIRFLOW_ROLE",
+                "private_key_file": str(key),
+                "authenticator": "snowflake_jwt",
+            }
+            config = SimpleNamespace(
+                login="SVC_AIRFLOW_TEST", schema="RAW", extra_dejson=extra
+            )
+            with patch.dict(os.environ, {"CUSTOMER360_RAW_PRIVATE_KEY_PATH": str(key)}):
+                self.assertEqual(
+                    pipeline._validate_raw_connection(config)["USER"],
+                    "SVC_AIRFLOW_TEST",
+                )
+                for changes in (
+                    {"role": "OTHER_READ_ROLE"},
+                    {"database": "CUSTOMER360_PROD"},
+                    {"private_key_file": None},
+                    {"private_key_file": str(key.parent / "missing.p8")},
+                    {"authenticator": "externalbrowser"},
+                    {"authenticator": "oauth"},
+                    {"token": "synthetic-token"},
+                    {"private_key_content": "synthetic-inline-key"},
+                ):
+                    invalid = SimpleNamespace(
+                        login="SVC_AIRFLOW_TEST",
+                        schema="RAW",
+                        extra_dejson={**extra, **changes},
+                    )
+                    with self.assertRaises(pipeline.AirflowFailException):
+                        pipeline._validate_raw_connection(invalid)
+                config.login = "PERSONAL_USER"
+                with self.assertRaises(pipeline.AirflowFailException):
+                    pipeline._validate_raw_connection(config)
+
+    def test_invalid_raw_connection_is_rejected_without_opening_snowflake(self):
+        validate = pipeline.pipeline.get_task("validate_raw").python_callable
+        config = SimpleNamespace(login="PERSONAL_USER", schema="RAW", extra_dejson={})
+        with (
+            patch.object(pipeline.Connection, "get", return_value=config),
+            patch("airflow.providers.snowflake.hooks.snowflake.SnowflakeHook") as hook,
+            self.assertRaises(pipeline.AirflowFailException),
+        ):
+            validate([{"status": "success"}])
+        hook.assert_not_called()
+
+    def test_approved_raw_connection_and_session_complete_mocked_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            key = Path(directory) / "synthetic.p8"
+            key.write_text("public metadata-only test fixture")
+            config = SimpleNamespace(
+                login="SVC_AIRFLOW_TEST",
+                schema="RAW",
+                extra_dejson={
+                    "database": "CUSTOMER360_TEST",
+                    "role": "C360_AIRFLOW_ROLE",
+                    "private_key_file": str(key),
+                },
+            )
+            validate = pipeline.pipeline.get_task("validate_raw").python_callable
+            with (
+                patch.dict(os.environ, {"CUSTOMER360_RAW_PRIVATE_KEY_PATH": str(key)}),
+                patch.object(pipeline.Connection, "get", return_value=config),
+                patch(
+                    "airflow.providers.snowflake.hooks.snowflake.SnowflakeHook"
+                ) as hook,
+            ):
+                hook.return_value.get_conn.return_value.cursor.return_value = (
+                    self.cursor()
+                )
+                self.assertEqual(
+                    validate([{"status": "success"}])["nonempty_tables"], 7
+                )
+                self.assertEqual(hook.call_args.kwargs["role"], "C360_AIRFLOW_ROLE")
+                with (
+                    patch.object(Path, "is_file", return_value=False),
+                    self.assertRaises(pipeline.AirflowFailException),
+                ):
+                    pipeline._validate_raw_connection(config)
+
+    def test_deployment_policy_rejects_admin_role_even_if_overridden(self):
+        with (
+            patch.dict(os.environ, {"CUSTOMER360_RAW_ROLE": "ACCOUNTADMIN"}),
+            self.assertRaises(pipeline.AirflowFailException),
+        ):
+            pipeline._snowflake_policy("RAW")
+
 
 class DbtTests(unittest.TestCase):
+    def profile_output(self, key):
+        return {
+            "type": "snowflake",
+            "database": "CUSTOMER360_TEST",
+            "schema": "SILVER",
+            "user": "SVC_DBT_TEST",
+            "role": "C360_DBT_ROLE",
+            "private_key_path": str(key),
+            "authenticator": "snowflake_jwt",
+        }
+
+    def write_profile(self, path, output):
+        path.write_text(json.dumps({"customer360": {"outputs": {"dev": output}}}))
+
     def test_three_expected_warnings_are_nonblocking(self):
         manifest = manifest_fixture()
         self.assertEqual(
@@ -418,6 +570,8 @@ class DbtTests(unittest.TestCase):
     def test_dbt_profile_guards_and_env_rendering(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "profiles.yml"
+            key = Path(directory) / "synthetic.p8"
+            key.write_text("public metadata-only test fixture")
             for database, role, valid in [
                 ("CUSTOMER360_TEST", "C360_DBT_ROLE", True),
                 ("CUSTOMER360_PROD", "C360_DBT_ROLE", False),
@@ -429,6 +583,7 @@ class DbtTests(unittest.TestCase):
                             "customer360": {
                                 "outputs": {
                                     "dev": {
+                                        **self.profile_output(key),
                                         "database": "{{ env_var('TEST_DBT_DATABASE') }}",
                                         "schema": "SILVER",
                                         "role": role,
@@ -440,13 +595,177 @@ class DbtTests(unittest.TestCase):
                 )
                 with (
                     self.subTest(database=database, role=role),
-                    patch.dict(os.environ, {"TEST_DBT_DATABASE": database}),
+                    patch.dict(
+                        os.environ,
+                        {
+                            "TEST_DBT_DATABASE": database,
+                            "CUSTOMER360_DBT_PRIVATE_KEY_PATH": str(key),
+                        },
+                    ),
                 ):
                     if valid:
                         pipeline._validate_dbt_profile(path)
                     else:
                         with self.assertRaises(pipeline.AirflowFailException):
                             pipeline._validate_dbt_profile(path)
+
+    def test_dbt_rejects_wrong_identity_and_unapproved_authentication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, key = (
+                Path(directory) / "profiles.yml",
+                Path(directory) / "synthetic.p8",
+            )
+            key.write_text("public metadata-only test fixture")
+            output = self.profile_output(key)
+            with patch.dict(os.environ, {"CUSTOMER360_DBT_PRIVATE_KEY_PATH": str(key)}):
+                for changes in (
+                    {"user": "PERSONAL_USER"},
+                    {"role": "OTHER_DBT_ROLE"},
+                    {"private_key_path": None},
+                    {"private_key_path": ""},
+                    {"private_key_path": str(key.parent / "missing.p8")},
+                    {"password": "synthetic-sensitive-password"},
+                    {"authenticator": "externalbrowser"},
+                    {"authenticator": "oauth"},
+                    {"authenticator": "username_password_mfa"},
+                    {"authenticator": "https://identity.example.invalid"},
+                    {"token": "synthetic-sensitive-token"},
+                    {"private_key": "synthetic-inline-key"},
+                    {"type": "other"},
+                ):
+                    self.write_profile(path, {**output, **changes})
+                    with self.assertRaises(pipeline.AirflowFailException) as caught:
+                        pipeline._validate_dbt_profile(path)
+                    self.assertNotIn("synthetic-sensitive", str(caught.exception))
+                self.write_profile(
+                    path,
+                    {
+                        **output,
+                        "password": "synthetic-password",
+                        "private_key_path": None,
+                    },
+                )
+                with self.assertRaises(pipeline.AirflowFailException):
+                    pipeline._validate_dbt_profile(path)
+
+    def test_wrong_dbt_profile_schema_blocks_before_dbt_subprocess(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            key = root / "synthetic.p8"
+            key.write_text("public metadata-only test fixture")
+            (root / "dbt_project.yml").write_text("name: customer360_dbt")
+            self.write_profile(
+                root / "profiles.yml", {**self.profile_output(key), "schema": "GOLD"}
+            )
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CUSTOMER360_DBT_PROJECT_DIR": str(root),
+                        "CUSTOMER360_DBT_PROFILES_DIR": str(root),
+                        "CUSTOMER360_DBT_PRIVATE_KEY_PATH": str(key),
+                    },
+                ),
+                patch.object(pipeline, "_run_dbt_command") as command,
+                self.assertRaises(pipeline.AirflowFailException),
+            ):
+                pipeline._build_dbt()
+            command.assert_not_called()
+
+    def test_dbt_key_path_rendering_and_metadata_checks_do_not_read_key_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, key = (
+                Path(directory) / "profiles.yml",
+                Path(directory) / "synthetic.p8",
+            )
+            key.write_text("public metadata-only test fixture")
+            self.write_profile(
+                path,
+                {
+                    **self.profile_output(key),
+                    "private_key_path": "{{ env_var('TEST_RSA_PATH') }}",
+                },
+            )
+            original = Path.read_text
+
+            def safe_read(file, *args, **kwargs):
+                if file == key:
+                    raise AssertionError("Private key contents must not be read")
+                return original(file, *args, **kwargs)
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CUSTOMER360_DBT_PRIVATE_KEY_PATH": str(key),
+                        "TEST_RSA_PATH": str(key),
+                    },
+                ),
+                patch.object(Path, "read_text", safe_read),
+                patch.object(
+                    Path,
+                    "read_bytes",
+                    side_effect=AssertionError("Private key bytes must not be read"),
+                ),
+            ):
+                pipeline._validate_dbt_profile(path)
+                with (
+                    patch.object(Path, "is_file", return_value=False),
+                    self.assertRaises(pipeline.AirflowFailException),
+                ):
+                    pipeline._validate_dbt_profile(path)
+                with (
+                    patch.object(pipeline.os, "access", return_value=False),
+                    self.assertRaises(pipeline.AirflowFailException),
+                ):
+                    pipeline._validate_dbt_profile(path)
+                key.write_text("")
+                with self.assertRaises(pipeline.AirflowFailException):
+                    pipeline._validate_dbt_profile(path)
+
+    def test_dbt_default_key_auth_and_key_passphrase_configuration_are_allowed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, key = (
+                Path(directory) / "profiles.yml",
+                Path(directory) / "synthetic.p8",
+            )
+            key.write_text("public metadata-only test fixture")
+            with patch.dict(os.environ, {"CUSTOMER360_DBT_PRIVATE_KEY_PATH": str(key)}):
+                for authenticator in (None, "snowflake", "snowflake_jwt"):
+                    self.write_profile(
+                        path,
+                        {
+                            **self.profile_output(key),
+                            "authenticator": authenticator,
+                            "private_key_passphrase": "{{ env_var('UNRESOLVED_TEST_KEY_PASSPHRASE') }}",
+                        },
+                    )
+                    pipeline._validate_dbt_profile(path)
+
+    def test_approved_deployment_identity_overrides_are_enforced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, key = (
+                Path(directory) / "profiles.yml",
+                Path(directory) / "synthetic.p8",
+            )
+            key.write_text("public metadata-only test fixture")
+            self.write_profile(
+                path,
+                {
+                    **self.profile_output(key),
+                    "user": "SVC_APPROVED_DBT",
+                    "role": "C360_APPROVED_DBT_ROLE",
+                },
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "CUSTOMER360_DBT_PRIVATE_KEY_PATH": str(key),
+                    "CUSTOMER360_DBT_USER": "SVC_APPROVED_DBT",
+                    "CUSTOMER360_DBT_ROLE": "C360_APPROVED_DBT_ROLE",
+                },
+            ):
+                pipeline._validate_dbt_profile(path)
 
     def test_build_uses_exact_selection_correct_cwd_and_fresh_private_artifacts(self):
         manifest = manifest_fixture()
@@ -469,11 +788,9 @@ class DbtTests(unittest.TestCase):
             project.mkdir()
             profile.mkdir()
             (project / "dbt_project.yml").write_text("name: customer360_dbt")
-            (profile / "profiles.yml").write_text(
-                "customer360:\n  outputs:\n    dev:\n"
-                "      database: CUSTOMER360_TEST\n      schema: SILVER\n"
-                "      role: C360_DBT_ROLE\n"
-            )
+            key = Path(directory) / "synthetic.p8"
+            key.write_text("public metadata-only test fixture")
+            self.write_profile(profile / "profiles.yml", self.profile_output(key))
             with (
                 patch.dict(
                     os.environ,
@@ -481,6 +798,7 @@ class DbtTests(unittest.TestCase):
                         "CUSTOMER360_DBT_PROJECT_DIR": str(project),
                         "CUSTOMER360_DBT_PROFILES_DIR": str(profile),
                         "CUSTOMER360_DBT_EXECUTABLE": "/opt/dbt/bin/dbt",
+                        "CUSTOMER360_DBT_PRIVATE_KEY_PATH": str(key),
                     },
                 ),
                 patch.object(pipeline, "_run_dbt_command", side_effect=run),

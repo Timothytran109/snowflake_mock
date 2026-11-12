@@ -34,6 +34,13 @@ x-airflow-common: &airflow-common
     CUSTOMER360_DBT_PROJECT_DIR: /opt/customer360/dbt
     CUSTOMER360_DBT_EXECUTABLE: /opt/dbt/bin/dbt
     CUSTOMER360_DBT_PROFILES_DIR: /opt/airflow/secrets/dbt
+    # Deployment-owned TEST identities and approved mounted key paths (not credentials).
+    CUSTOMER360_RAW_USER: ${CUSTOMER360_RAW_USER:-SVC_AIRFLOW_TEST}
+    CUSTOMER360_RAW_ROLE: ${CUSTOMER360_RAW_ROLE:-C360_AIRFLOW_ROLE}
+    CUSTOMER360_RAW_PRIVATE_KEY_PATH: ${CUSTOMER360_RAW_PRIVATE_KEY_PATH:-/opt/airflow/secrets/snowflake/airflow_rsa_key.p8}
+    CUSTOMER360_DBT_USER: ${CUSTOMER360_DBT_USER:-SVC_DBT_TEST}
+    CUSTOMER360_DBT_ROLE: ${CUSTOMER360_DBT_ROLE:-C360_DBT_ROLE}
+    CUSTOMER360_DBT_PRIVATE_KEY_PATH: ${CUSTOMER360_DBT_PRIVATE_KEY_PATH:-/opt/airflow/secrets/snowflake/dbt_rsa_key.p8}
     DBT_PROFILES_DIR: /opt/airflow/secrets/dbt
     DBT_TARGET: dev
     DBT_TARGET_PATH: /tmp/customer360-dbt-target
@@ -67,6 +74,12 @@ x-airflow-common: &airflow-common
     - type: bind
       source: ${CUSTOMER360_KEYS_HOST_DIR:-./.local/customer360/keys}
       target: /opt/airflow/secrets/keys
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./keys/snowflake
+      target: /opt/airflow/secrets/snowflake
       read_only: true
       bind:
         create_host_path: false
