@@ -12,6 +12,7 @@ x-airflow-common: &airflow-common
       required: false
   environment: &airflow-environment
     HOME: /home/airflow
+    AIRFLOW__CORE__TEST_CONNECTION: "Enabled"
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
@@ -29,6 +30,8 @@ x-airflow-common: &airflow-common
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
     AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "30"
     CUSTOMER360_SCHEDULE: ""
+    CUSTOMER360_FIVETRAN_CONNECTOR_ID: ${CUSTOMER360_FIVETRAN_CONNECTOR_ID:-}
+    CUSTOMER360_FIVETRAN_DESTINATION_ID: ${CUSTOMER360_FIVETRAN_DESTINATION_ID:-}
     # Root .env / explicit Compose interpolation only; never default recipients to empty.
     CUSTOMER360_ALERT_EMAILS: ${CUSTOMER360_ALERT_EMAILS:?Set CUSTOMER360_ALERT_EMAILS in the repository root .env}
     CUSTOMER360_DBT_PROJECT_DIR: /opt/customer360/dbt
@@ -154,6 +157,20 @@ services:
       test: [CMD, curl, --fail, --silent, http://localhost:8974/health]
       interval: 15s
       timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    depends_on:
+      <<: *airflow-dependencies
+      airflow-api-server:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD-SHELL, 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 20s
       retries: 10
       start_period: 90s
 

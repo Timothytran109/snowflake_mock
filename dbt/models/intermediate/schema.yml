@@ -219,12 +219,13 @@ models:
           - false
           quote: false
 - name: int_data_quality__orphan_records
-  description: 'Current exception snapshot, one row per (source_system, record_type, record_id). Rebuilt
-    each run, not an audit history. Payment reason precedence: missing customer, missing subscription,
-    orphaned subscription, customer mismatch. Detailed flags remain in Silver.'
+  description: 'Current data-quality exception snapshot; historical orphan_records name retained.
+    One row per (source_system, record_type, record_id, exception_reason), including every applicable
+    payment relationship reason and the three approved missing-date reasons. Rebuilt each run,
+    not an audit history. Date exceptions alone do not invalidate a parent or exclude date-independent facts.'
   columns:
   - name: exception_id
-    description: Stable SHA-256 of the JSON array of source system, record type and record ID.
+    description: Stable SHA-256 of the JSON array of source system, record type, record ID and exception reason.
     tests:
     - not_null
     - unique
@@ -237,8 +238,9 @@ models:
           values:
           - salesforce
           - stripe
+          - adobe
   - name: record_type
-    description: Source fact type.
+    description: Source entity type; includes facts and parents with date-quality exceptions.
     tests:
     - not_null
     - accepted_values:
@@ -247,19 +249,22 @@ models:
           - opportunity
           - subscription
           - payment
+          - event
+          - customer
+          - account
   - name: record_id
     description: Original source business key.
     tests:
     - not_null
   - name: parent_key
-    description: Missing customer/account or invalid subscription ID; null when the required source foreign
-      key itself is null.
+    description: Missing customer/account or invalid subscription ID; null for date exceptions and when
+      the required source foreign key itself is null.
   - name: detected_at
     description: UTC build start timestamp (TIMESTAMP_TZ) for this evaluation, not first-ever detection.
     tests:
     - not_null
   - name: exception_reason
-    description: Primary reason the fact is excluded from trusted Gold.
+    description: Machine-readable exception type; all applicable reasons are independent rows.
     tests:
     - not_null
     - accepted_values:
@@ -270,3 +275,6 @@ models:
           - missing_subscription
           - orphaned_subscription
           - subscription_customer_mismatch
+          - missing_event_timestamp
+          - missing_created_at
+          - missing_updated_at

@@ -1,0 +1,103 @@
+Missing-date exception workflow validation
+Date: 2026-11-12 (America/Los_Angeles)
+Repository: C:\Projects\work_projects\mock_project
+Existing images reused; no service recreation, image build or live integration.
+
+Scope and behavior
+- Keep CUSTOMER360_TEST.SILVER.INT_DATA_QUALITY__ORPHAN_RECORDS and its existing
+  seven output columns; expand its documented purpose to data-quality exceptions.
+- Preserve every existing missing-parent reason and Gold orphan exclusion.
+  Emit all applicable payment relationship reasons instead of only the primary
+  one. A payment with multiple invalid relationships has multiple exception rows.
+- Add missing_event_timestamp (Adobe event), missing_created_at (Stripe customer),
+  and missing_updated_at (Salesforce account), based on null parsed staging dates.
+  Date-only exceptions use null parent_key and do not invalidate parent identity.
+- ID grain is source_system / record_type / record_id / exception_reason, hashed
+  as a JSON array with SHA-256. Existing IDs change once on the next rebuild.
+  Consumers must distinguish exception counts from affected-record counts.
+- Keep the table materialization/current-state rebuild: resolved rows disappear;
+  detected_at remains evaluation time, not source date or first-ever detection.
+- Change only the three corresponding staging not_null definitions to warnings.
+  Keep existing relationship warnings; all other tests, including Gold, are errors.
+- The three current Gold facts do not depend on these missing parent/event dates.
+  Their SQL and reconciliations remain unchanged. Future date-dependent metrics
+  must exclude nulls locally to that metric, without a blanket exception anti-join.
+
+Files changed in this task
+airflow/dags/customer360_pipeline.py
+airflow/tests/test_customer360_pipeline.py
+airflow/README.md
+dbt/models/intermediate/int_data_quality__orphan_records.sql
+dbt/models/intermediate/schema.yml
+dbt/models/intermediate/unit_tests.yml
+dbt/models/intermediate/README.md
+dbt/models/staging/schema.yml
+dbt/models/staging/unit_tests.yml
+dbt/models/staging/README.md
+dbt/tests/orphan_records_complete.sql
+dbt/local_tests/test_data_quality_exceptions.py
+This validation record.
+
+Mocked checks ran before dbt parsing
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/python --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" customer360-airflow-dev:3.3.2-python3.12 -m pytest /opt/airflow/source/tests/test_customer360_pipeline.py -q -p no:cacheprovider
+Result: exit 0; 49 passed in 25.27s. Includes the independent exact six-name
+warning allowlist, all six allowed warnings, zero warnings after resolution,
+fail/error/skipped results even on approved tests, unapproved staging date
+warnings, strict Gold failures, imports/serialization and existing safety checks.
+
+docker run --rm --network none --entrypoint /opt/dbt/bin/python --mount "type=bind,source=$($PWD.Path)/dbt,target=/opt/customer360/dbt,readonly" customer360-airflow:3.3.2-python3.12 -m unittest discover -s /opt/customer360/dbt/local_tests -v
+Result: exit 0; 6 passed (final run 2.623s). Replays all 9 checked-in intermediate
+and Gold unit fixtures locally, then checks stable/distinct IDs, partial/full
+resolution, parent eligibility through Gold, and completeness rejection of
+missing relationship/date reasons, extra rows, duplicates, wrong IDs/parent keys.
+Uses synthetic in-memory SQLite relations with narrow Snowflake function/cast
+adaptations. This is not execution of dbt unit tests on Snowflake.
+
+Credential-free parsing
+/opt/dbt/bin/dbt parse --no-partial-parse --profiles-dir <temporary-dummy-profile-directory> --project-dir /opt/customer360/dbt --target dev
+Executed by inline Python in the existing runtime image with --network none,
+read-only dbt and DAG source mounts, temporary target/log directories, and
+DBT_SEND_ANONYMOUS_USAGE_STATS=false. No real profiles or keys mounted.
+Result: exit 0; dbt Core 1.12.6, Snowflake adapter 1.12.5. All 22 dbt unit-test
+definitions parsed. Manifest assertions confirm exactly the six warning names
+below match the DAG allowlist, every other data test is an error, all 14 models
+route to CUSTOMER360_TEST.SILVER/GOLD, all sources use TEST.RAW XLSM identifiers,
+and the exception model is materialized as a table.
+
+not_null_stg_adobe__events_event_timestamp
+not_null_stg_stripe__customers_created_at
+not_null_stg_salesforce__accounts_updated_at
+relationships_stg_salesforce__opportunities_account_id__account_id__ref_stg_salesforce__accounts_
+relationships_stg_stripe__subscriptions_customer_id__customer_id__ref_stg_stripe__customers_
+relationships_stg_stripe__payments_customer_id__customer_id__ref_stg_stripe__customers_
+
+Other checks
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/ruff --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" --mount "type=bind,source=$($PWD.Path)/dbt/local_tests,target=/opt/customer360/local-tests,readonly" --mount "type=bind,source=$($PWD.Path)/docker/tests,target=/opt/customer360/compose-tests,readonly" --mount "type=bind,source=$($PWD.Path)/pyproject.toml,target=/opt/customer360/pyproject.toml,readonly" customer360-airflow-dev:3.3.2-python3.12 check --no-cache --config /opt/customer360/pyproject.toml /opt/airflow/source/dags/customer360_pipeline.py /opt/airflow/source/tests /opt/customer360/local-tests /opt/customer360/compose-tests
+Result: exit 0; all project-configured Ruff checks passed.
+
+docker compose config --quiet
+Result: exit 0; expanded configuration not printed.
+python -m unittest discover -s docker/tests -p test_compose_alert_configuration.py -v
+Result: exit 0; 5 passed in 2.511s with isolated synthetic dotenv fixtures.
+git diff --check
+Result: exit 0; pre-existing LF/CRLF notices only for the requirements and timestamp macro.
+
+Additional network-disabled SQLGlot Snowflake-dialect grammar checks passed for
+the snapshot model and completeness test. The snapshot's seven final column
+names are unchanged. Hash comparisons against the initial worktree confirm
+the dbt source mapping, existing timestamp macro, intermediate fact models,
+Gold models/reconciliations, dependencies and Compose configuration are unchanged.
+
+Remaining live validation
+- Snowflake dbt unit/data tests executed: ZERO. Parsing and SQLite replay do not
+  certify Snowflake type coercion, JSON/hash representation, dbt empty-fixture
+  compilation, permissions or current source data.
+- A later authorized TEST build must run dbt build --select staging intermediate
+  marts --threads 1, execute the actual unit/completeness/integrity/reconciliation
+  tests, inspect current exception rows/counts, and verify resolved source dates
+  disappear after rebuilding. Generate warehouse-backed dbt docs only when allowed.
+- Any existing timestamp-macro changes were preserved, not validated against live
+  source timestamps by this task. The new date fixtures require Snowflake execution.
+- No dates or parents were inserted into RAW; real keys/profiles/credentials were
+  not read or changed, no DAG/Fivetran sync was triggered, and no Snowflake or SMTP
+  connection, commit or push was performed. Earlier audits remain unchanged.

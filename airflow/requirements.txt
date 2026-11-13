@@ -4,4 +4,5 @@ apache-airflow==3.3.2
 apache-airflow-providers-standard==1.19.0
 apache-airflow-providers-snowflake==6.17.0
 apache-airflow-providers-smtp==3.0.4
+airflow-provider-fivetran-async==2.4.0
 requests==2.34.2

@@ -1,0 +1,157 @@
+Customer 360 refresh investigation and completion guard
+Date: 2026-11-12 (America/Los_Angeles)
+Repository: C:\Projects\work_projects\mock_project
+
+Incident boundary
+The user observed PAY_1000 in RAW and the staging view after a green DAG run,
+but not in intermediate/Gold until a later local dbt build. The user cannot
+identify the exact run or confirm when the payment first reached RAW. Arrival
+timing is unconfirmed; staging is a view and does not establish build-time data.
+No live source/payment query was made and no connector or DAG was triggered.
+
+Read-only evidence
+1. Latest retained successful run:
+   manual__2026-11-12T20:30:22.007544+00:00
+   DAG: 20:30:22.679342Z -> 20:34:35.956597Z, success.
+   Sync task: 20:30:24.548484Z -> 20:31:35.131898Z, success.
+   Trigger logs: syncing at 20:30:31.873586Z; scheduled at 20:31:32.386876Z.
+   Reported completion: 20:30:59.607000Z.
+   RAW validation: 20:31:35.713268Z -> 20:31:51.101755Z, success.
+   dbt: 20:31:51.837867Z -> 20:34:34.958745Z, success.
+   Safe task logs contain all 14 model successes, including int_stripe__payments,
+   int_data_quality__orphan_records and fct_payments; final summary is
+   models=14 tests=134 expected_warnings=3.
+   The successful 20:09 and 20:17 runs also logged all 14 model successes and
+   syncing -> scheduled transitions. No premature completion is demonstrated
+   in these retained successful runs.
+
+2. Older anomalous run:
+   manual__2026-11-12T19:20:45.357511+00:00 is currently labeled success, but its
+   retained dbt attempts logged skipped downstream models and no successful
+   dbt completion summary. Local metadata audit records show run_dbt retries
+   at 19:23:35.284968Z and 19:32:19.042651Z, not successful completion. Its current
+   task-instance set lacks run_dbt. Why the final DAG state/task records differ
+   cannot be established from this evidence. Do not infer a user action or
+   treat that green label as proof of a refresh.
+
+3. Later local artifacts:
+   dbt/target/run_results.json generated 2026-11-12T22:57:15.162106Z, with a matching
+   manifest invocation. Command is build, no select/exclude/selector override,
+   threads=1; all 14 models succeeded, 131 tests passed and 3 warned.
+   int_stripe__payments finished at 22:56:37.699852Z and fct_payments at
+   22:56:50.757198Z; each adapter reported 8 affected rows. The artifacts contain
+   no payment-level proof; PAY_1000's resulting presence is the user's report.
+   This build completed over two hours after the latest retained Airflow run.
+
+4. Command, mounts and routing:
+   Current Airflow executes /opt/dbt/bin/dbt build --select staging intermediate
+   marts --threads 1, after a credential-free-style preflight parse using the
+   real runtime profile. It sets cwd=/opt/customer360/dbt, DBT_PROFILE=customer360,
+   DBT_TARGET=dev, isolated temporary target/log directories and no partial parse.
+   The command selects staging, all four intermediate models including exceptions,
+   and all three Gold marts. No staging-only selector was found.
+   Historical temporary dbt artifacts/stdout were deleted by design, so exact
+   historical argv cannot be recovered; retained model-status logs prove those
+   successful runs did execute all 14 models. New safe command logging addresses
+   this evidence gap for future runs.
+   All 29 current project/model/macro/test SQL/YAML source hashes match between
+   the local project and the running scheduler's read-only dbt mount. The DAG
+   source hash also matched at the beginning of inspection, before this fix.
+   Current equality does not prove immutable historical code versions.
+   Mounted profile: customer360/dev, CUSTOMER360_TEST.SILVER, SVC_DBT_TEST /
+   C360_DBT_ROLE. The schema macro routes marts to CUSTOMER360_TEST.GOLD.
+   Account, database, schema and role compare equal with the local profile;
+   the local user differs. Actual identity/account/credential values were not
+   printed. Row-visibility differences cannot be excluded without live checks.
+   No DBT_EMPTY, SAMPLE, DEFER, FAVOR_STATE, EXCLUDE, SELECT or SELECTOR override
+   was set in the running scheduler. Its dbt executable resolves to
+   /opt/dbt/bin/dbt; Core=1.12.6, adapter=1.12.5. Running services use a previous
+   image, but source is bind-mounted and provider version is confirmed as 2.4.0.
+
+Demonstrated component defect and scoped fix
+- Provider 2.4.0's async get_sync_status_async() delegates with
+  always_wait_when_syncing=False. With a newer succeeded_at AND sync_state=syncing,
+  the real installed provider reports success in a mocked reproduction. Its
+  synchronous initial completion check uses always_wait_when_syncing=True.
+- The previous callback trusted status=success without reconciling the current
+  connector state or retaining its pre-sync completion watermark. This allows
+  premature release under concurrent/rescheduled ingestion. It is a demonstrated
+  code-level gap, NOT a proven explanation of the particular PAY_1000 incident.
+- The guarded operator now captures the provider's existing watermark in _sync(),
+  persists it in TaskDeferred callback kwargs, and rechecks completion after both
+  immediate and asynchronous provider success. Current destination/connector
+  guards run again; success must be strictly newer than the watermark, the
+  connector must be idle/scheduled, no newer failure can supersede the success,
+  and any reported completion must be valid and visible in current metadata.
+- Missing/stale/inflight/rescheduled/inconsistent results fail closed using the
+  existing retry policy; a retry can issue another force request. This preserves
+  the provider, deferred trigger, timeout, credentials and four-task ordering.
+- Safe logs now capture the provider watermark/completion, exact dbt argv/cwd/
+  profile/target and each model's destination, numeric adapter count and execution
+  times. No environment dump, profile contents, full API/adapter payload, raw
+  dbt output or private-key contents are logged. View DDL counts are not source
+  row counts, and no per-payment freshness guarantee is inferred from them.
+
+Files changed in this task
+airflow/dags/customer360_pipeline.py
+airflow/tests/test_customer360_pipeline.py
+airflow/README.md
+dbt/local_tests/test_data_quality_exceptions.py
+This validation record.
+All dbt model SQL, source mappings, schemas, existing exception policy, timestamp
+macro, dependency inputs and Compose configuration remain unchanged in this task.
+Prior worktree changes and audits were preserved. No schedule was added.
+
+Validation commands and results
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/python --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" customer360-airflow-dev:3.3.2-python3.12 -m pytest /opt/airflow/source/tests/test_customer360_pipeline.py -q -p no:cacheprovider
+PASS: 58 tests in 12.80s. Three provider deprecation UserWarnings are expected
+from explicitly exercising its current get_sync_status_async API; no rule or
+warning was globally disabled. Coverage includes real-provider inflight success
+reproduction with our final guard rejecting it, serialized callback watermark
+rehydration via resume_execution, stale/missing/failing metadata, immediate
+completion, full command selectors, task invocation, skipped/missing models,
+safe diagnostics, imports/serialization and existing safety/exception checks.
+
+docker run --rm --network none --entrypoint /opt/dbt/bin/python --mount "type=bind,source=$($PWD.Path)/dbt,target=/opt/customer360/dbt,readonly" customer360-airflow:3.3.2-python3.12 -m unittest discover -s /opt/customer360/dbt/local_tests -v
+PASS: 8 tests in 4.427s. Synthetic PAY_1000 available before the model builds
+propagates to intermediate and Gold. A typed synthetic RAW table/staging view
+fixture reproduces the exact view/table discrepancy when a payment arrives
+after a table build, then shows it resolved by the next complete table build.
+These are relational SQLite checks using actual downstream SQL, not Snowflake
+date casts, data tests or a live Fivetran ingestion test.
+
+docker run --rm --network none --entrypoint python --env PYTHONPATH=/opt/airflow/tests --mount "type=bind,source=$($PWD.Path)/airflow/tests,target=/opt/airflow/tests,readonly" --mount "type=bind,source=$($PWD.Path)/dbt,target=/opt/customer360/dbt,readonly" customer360-airflow:3.3.2-python3.12 -m unittest test_container_runtime.ContainerRuntimeTests.test_mounted_dbt_project_parses_without_external_credentials -v
+PASS: 1 test in 16.991s. Runs dbt parse --no-partial-parse with a temporary dummy
+profile, target/log directories and disabled anonymous statistics. No credentials
+or Snowflake queries are involved.
+
+docker run --rm --network none --entrypoint /opt/customer360/dev/bin/ruff --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" --mount "type=bind,source=$($PWD.Path)/dbt/local_tests,target=/opt/customer360/local-tests,readonly" --mount "type=bind,source=$($PWD.Path)/pyproject.toml,target=/opt/customer360/pyproject.toml,readonly" customer360-airflow-dev:3.3.2-python3.12 check --no-cache --config /opt/customer360/pyproject.toml /opt/airflow/source/dags/customer360_pipeline.py /opt/airflow/source/tests /opt/customer360/local-tests
+PASS: project Ruff checks.
+python -m unittest discover -s docker/tests -p test_compose_alert_configuration.py -v
+PASS: 5 synthetic Compose tests in 2.639s.
+docker compose config --quiet
+PASS: expanded environment not printed.
+git diff --check
+PASS: pre-existing LF/CRLF notices only.
+git diff --cached --exit-code
+PASS: index empty; no commit or push.
+
+Remaining uncertainty and live boundary
+- PAY_1000's arrival, workbook upload/capture time, historical row visibility
+  and exact affected run are unconfirmed. Late ingestion is a reproduced
+  explanation, not a finding that it happened. The corrected provider race is
+  likewise not proven to have occurred in the retained successful runs.
+- Confirming the incident requires protected source-arrival/query-history
+  evidence and, if needed, comparison under the approved service identity.
+  A later authorized end-to-end run can validate the strengthened completion
+  check and payment propagation; none was triggered here.
+- A completed ingestion/build cannot include source changes arriving afterward.
+  RAW is not frozen transactionally, and no connector completion marker identifies
+  a particular payment/workbook version. The new check is a conservative
+  post-watermark idle-success check, not a per-file transactional ingestion proof.
+- Existing deferred callbacks from before this change lack the saved watermark;
+  they fail closed and need the normal task retry. No running task was cleared.
+- No Fivetran/Snowflake/SMTP calls, live dbt build, credential edits, private-key
+  content reads, service recreation, schedule changes, commit or push were made.
+  Inspection used local Airflow metadata/logs, source hashes, redacted profile
+  routing comparisons and existing local artifacts.

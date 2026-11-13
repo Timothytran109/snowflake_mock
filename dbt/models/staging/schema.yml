@@ -33,6 +33,8 @@ models:
               arguments:
                 to: "ref('stg_stripe__subscriptions')"
                 field: "subscription_id"
+              config:
+                severity: warn
       - name: amount
         description: "Payment amount as DECIMAL(18,2)."
         tests:
@@ -66,7 +68,9 @@ models:
       - name: created_at
         description: "Parsed source wall-clock timestamp (TIMESTAMP_NTZ); accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats."
         tests:
-          - not_null
+          - not_null:
+              config:
+                severity: warn
       - name: loaded_at
         description: "Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source row."
       - name: _line
@@ -140,7 +144,9 @@ models:
       - name: updated_at
         description: "Parsed source wall-clock timestamp (TIMESTAMP_NTZ); accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats."
         tests:
-          - not_null
+          - not_null:
+              config:
+                severity: warn
       - name: loaded_at
         description: "Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source row."
       - name: _line
@@ -225,7 +231,9 @@ models:
       - name: event_timestamp
         description: "Parsed source wall-clock timestamp (TIMESTAMP_NTZ); accepts ISO, MM/DD/YYYY and YYYY/MM/DD formats."
         tests:
-          - not_null
+          - not_null:
+              config:
+                severity: warn
       - name: loaded_at
         description: "Fivetran sync timestamp from _fivetran_synced; used first when selecting the latest source row."
       - name: _line

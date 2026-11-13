@@ -1,6 +1,59 @@
 # Synthetic fixtures exercise transformations independently of current RAW contents.
 version: 2
 unit_tests:
+- name: stripe_customer_missing_creation_dates_stay_null
+  model: stg_stripe__customers
+  given:
+  - input: source('raw', 'mock_stripe_customers')
+    rows:
+    - {_line: 1, _fivetran_synced: '2026-11-12 00:00:00 +00:00', customer_id: null_date, email: a@example.invalid, created_at: null}
+    - {_line: 2, _fivetran_synced: '2026-11-12 00:00:00 +00:00', customer_id: blank_date, email: b@example.invalid, created_at: ' '}
+    - {_line: 3, _fivetran_synced: '2026-11-12 00:00:00 +00:00', customer_id: invalid_date, email: c@example.invalid, created_at: not-a-date}
+    - {_line: 4, _fivetran_synced: '2026-11-12 00:00:00 +00:00', customer_id: healthy, email: d@example.invalid, created_at: '2026-01-01'}
+  expect:
+    rows:
+    - {customer_id: null_date, created_at: null}
+    - {customer_id: blank_date, created_at: null}
+    - {customer_id: invalid_date, created_at: null}
+    - {customer_id: healthy, created_at: '2026-01-01 00:00:00'}
+- name: salesforce_account_missing_update_dates_stay_null
+  model: stg_salesforce__accounts
+  given:
+  - input: source('raw', 'mock_salesforce_accounts')
+    rows:
+    - {_line: 1, _fivetran_synced: '2026-11-12 00:00:00 +00:00', account_id: null_date, email: a@example.invalid, company_name: A,
+       industry: Tech, created_at: '2026-01-01', updated_at: null}
+    - {_line: 2, _fivetran_synced: '2026-11-12 00:00:00 +00:00', account_id: blank_date, email: b@example.invalid, company_name: B,
+       industry: Tech, created_at: '2026-01-01', updated_at: ' '}
+    - {_line: 3, _fivetran_synced: '2026-11-12 00:00:00 +00:00', account_id: invalid_date, email: c@example.invalid, company_name: C,
+       industry: Tech, created_at: '2026-01-01', updated_at: not-a-date}
+    - {_line: 4, _fivetran_synced: '2026-11-12 00:00:00 +00:00', account_id: healthy, email: d@example.invalid, company_name: D,
+       industry: Tech, created_at: '2026-01-01', updated_at: '2026-02-01'}
+  expect:
+    rows:
+    - {account_id: null_date, updated_at: null}
+    - {account_id: blank_date, updated_at: null}
+    - {account_id: invalid_date, updated_at: null}
+    - {account_id: healthy, updated_at: '2026-02-01 00:00:00'}
+- name: adobe_event_missing_timestamps_stay_null
+  model: stg_adobe__events
+  given:
+  - input: source('raw', 'mock_adobe_events')
+    rows:
+    - {_line: 1, _fivetran_synced: '2026-11-12 00:00:00 +00:00', event_id: null_date, email: a@example.invalid,
+       event_type: click, device_type: desktop, campaign_id: campaign, event_timestamp: null}
+    - {_line: 2, _fivetran_synced: '2026-11-12 00:00:00 +00:00', event_id: blank_date, email: b@example.invalid,
+       event_type: click, device_type: desktop, campaign_id: campaign, event_timestamp: ' '}
+    - {_line: 3, _fivetran_synced: '2026-11-12 00:00:00 +00:00', event_id: invalid_date, email: c@example.invalid,
+       event_type: click, device_type: desktop, campaign_id: campaign, event_timestamp: not-a-date}
+    - {_line: 4, _fivetran_synced: '2026-11-12 00:00:00 +00:00', event_id: healthy, email: d@example.invalid,
+       event_type: click, device_type: desktop, campaign_id: campaign, event_timestamp: '2026-01-01'}
+  expect:
+    rows:
+    - {event_id: null_date, event_timestamp: null}
+    - {event_id: blank_date, event_timestamp: null}
+    - {event_id: invalid_date, event_timestamp: null}
+    - {event_id: healthy, event_timestamp: '2026-01-01 00:00:00'}
 - name: stripe_payments_preserve_sync_then_payment_timestamp_priority
   model: stg_stripe__payments
   given:

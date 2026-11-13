@@ -1,0 +1,82 @@
+Missing-subscription warning policy validation -- 2026-11-12
+
+Scope and diagnosis
+-------------------
+The reported failing test is:
+relationships_stg_stripe__payments_subscription_id__subscription_id__ref_stg_stripe__subscriptions_
+
+Its staging severity was error, unlike other supported missing-parent exceptions.
+Existing int_stripe__payments retains payments with is_subscription_missing and
+is_orphan flags; the exception snapshot already emits missing_subscription with
+the subscription ID as parent_key. Existing Gold filters already exclude them.
+The error prevented these downstream relations from rebuilding. No failing-row
+identity or live warehouse state was inspected in this validation.
+
+Only that additional staging test changes to warn. The DAG approves its exact
+name, for seven approved warning tests total. Other warning/error/skip handling,
+Gold tests and reconciliations, and transformation SQL remain unchanged.
+
+Files changed in this task (other pre-existing worktree edits preserved)
+----------------------------------------------------------------------
+airflow/dags/customer360_pipeline.py
+airflow/tests/test_customer360_pipeline.py
+airflow/tests/test_container_runtime.py
+airflow/README.md
+dbt/models/staging/schema.yml
+dbt/models/staging/README.md
+dbt/models/intermediate/README.md
+dbt/local_tests/test_data_quality_exceptions.py
+docs/validation/2026-11-12/missing-subscription-warning-validation.txt
+
+Commands executed from the repository root in PowerShell
+------------------------------------------------------
+1. docker run --rm --network none --entrypoint /opt/customer360/dev/bin/python --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" customer360-airflow-dev:3.3.2-python3.12 -m pytest /opt/airflow/source/tests/test_customer360_pipeline.py -q -p no:cacheprovider
+   PASS: 59 tests, 3 existing provider get_sync_status_async deprecation warnings.
+   Includes DAG import/serialization, exact warning policy, full mocked dbt build
+   selection, completed exception snapshot acceptance, and rejecting skipped/error
+   snapshot results even when the relationship result is an approved warning.
+
+2. docker run --rm --network none --entrypoint /opt/dbt/bin/python --mount "type=bind,source=$($PWD.Path)/dbt,target=/opt/customer360/dbt,readonly" customer360-airflow:3.3.2-python3.12 -m unittest discover -s /opt/customer360/dbt/local_tests -v
+   PASS: 9 tests, including replay of existing intermediate/Gold dbt unit fixtures.
+   New regression executes actual intermediate, exception, Gold and completeness
+   SQL on synthetic SQLite inputs. A valid-customer payment with a non-null absent
+   subscription is retained unchanged in Silver, flagged and excepted, and absent
+   from Gold. Restoring only its synthetic subscription for that same customer,
+   then rebuilding the SQL graph, clears the exception/flags and admits the payment
+   to Gold. Full valid-Silver row reconciliation and the existing Gold subscription
+   customer consistency SQL pass both before and after restoration.
+
+3. docker run --rm --network none --entrypoint python --env PYTHONPATH=/opt/airflow/tests --mount "type=bind,source=$($PWD.Path)/airflow/tests,target=/opt/airflow/tests,readonly" --mount "type=bind,source=$($PWD.Path)/dbt,target=/opt/customer360/dbt,readonly" customer360-airflow:3.3.2-python3.12 -m unittest test_container_runtime.ContainerRuntimeTests.test_mounted_dbt_project_parses_without_external_credentials -v
+   PASS: 1 test invokes dbt parse --no-partial-parse with a temporary nonfunctional
+   profile and private temporary artifacts, no mounted credentials, no networking.
+   Confirms exact test severity, seven warning definitions, strict severity for
+   every test directly depending on Gold models, TEST SILVER/GOLD routing, and
+   exception table dependency on int_stripe__payments.
+   Initial added assertion failed because dbt serializes default severity as
+   uppercase ERROR. Corrected the assertion to compare case-insensitively; rerun
+   passed. No production configuration was changed for this test correction.
+
+4. docker run --rm --network none --entrypoint /opt/customer360/dev/bin/ruff --mount "type=bind,source=$($PWD.Path)/airflow,target=/opt/airflow/source,readonly" --mount "type=bind,source=$($PWD.Path)/dbt/local_tests,target=/opt/customer360/local-tests,readonly" --mount "type=bind,source=$($PWD.Path)/pyproject.toml,target=/opt/customer360/pyproject.toml,readonly" customer360-airflow-dev:3.3.2-python3.12 check --no-cache --config /opt/customer360/pyproject.toml /opt/airflow/source/dags/customer360_pipeline.py /opt/airflow/source/tests /opt/customer360/local-tests
+   PASS: All checks passed using the intended project configuration.
+
+5. python -m unittest discover -s docker/tests -p test_compose_alert_configuration.py -v
+   PASS: 5 mocked Compose policy/precedence tests.
+
+6. docker compose config --quiet
+   PASS. Expanded environment values were not printed.
+
+7. git diff --check
+   PASS. Git emits line-ending normalization notices for some worktree files;
+   no whitespace errors. git diff --cached --exit-code also passes (nothing staged).
+
+Validation boundary
+-------------------
+No Snowflake dbt build/test/docs command was executed, so Snowflake adapter
+execution, current failing rows, and live exception contents remain unverified.
+The SQLite harness adapts Snowflake hashing/JSON/null equality and the evaluation
+timestamp cast; it does not replace Snowflake/dbt execution validation.
+The Airflow dbt subprocess is mocked; actual downstream SQL is exercised separately.
+An authorized full TEST dbt build must confirm live relationship warnings no longer
+skip intermediate/exception nodes and Gold integrity/reconciliations pass.
+No services were recreated, integrations contacted, real parent rows fabricated,
+credentials changed, files staged, commits made or changes pushed.

@@ -147,6 +147,41 @@ class ContainerRuntimeTests(unittest.TestCase):
             for node in models:
                 self.assertEqual(node["database"], "CUSTOMER360_TEST")
                 self.assertIn(node["schema"], {"SILVER", "GOLD"})
+            missing_subscription_test = (
+                "relationships_stg_stripe__payments_subscription_id__subscription_id__ref_stg_stripe__subscriptions_"
+            )
+            tests = [
+                node
+                for node in manifest["nodes"].values()
+                if node["resource_type"] == "test"
+            ]
+            matching = [
+                node for node in tests if node["name"] == missing_subscription_test
+            ]
+            self.assertEqual(len(matching), 1)
+            self.assertEqual(matching[0]["config"]["severity"].lower(), "warn")
+            self.assertEqual(
+                sum(node["config"]["severity"].lower() == "warn" for node in tests), 7
+            )
+            gold_ids = {
+                node["unique_id"] for node in models if node["schema"] == "GOLD"
+            }
+            gold_tests = [
+                node
+                for node in tests
+                if gold_ids.intersection(node["depends_on"]["nodes"])
+            ]
+            self.assertGreater(len(gold_tests), 0)
+            for node in gold_tests:
+                self.assertEqual(node["config"]["severity"].lower(), "error", node["name"])
+            snapshot = manifest["nodes"][
+                "model.customer360_dbt.int_data_quality__orphan_records"
+            ]
+            self.assertEqual(snapshot["config"]["materialized"], "table")
+            self.assertIn(
+                "model.customer360_dbt.int_stripe__payments",
+                snapshot["depends_on"]["nodes"],
+            )
 
 
 if __name__ == "__main__":

@@ -5,6 +5,40 @@ through `source('raw', ...)` and build in `CUSTOMER360_TEST.SILVER` with the
 local `dev` profile. Confirm the profile database, schema and role before
 running; the profile and credentials remain outside the repository.
 
+The active ingestion workbooks are XLSM files. `_sources.yml` keeps the existing
+logical names and explicitly maps each to one physical table in
+`CUSTOMER360_TEST.RAW`:
+
+- `raw.mock_stripe_payments` -> `MOCK_STRIPE_XLSM_PAYMENTS`
+- `raw.mock_stripe_customers` -> `MOCK_STRIPE_XLSM_CUSTOMERS`
+- `raw.mock_stripe_subscriptions` -> `MOCK_STRIPE_XLSM_SUBSCRIPTIONS`
+- `raw.mock_salesforce_accounts` -> `MOCK_SALESFORCE_XLSM_ACCOUNTS`
+- `raw.mock_salesforce_opportunities` -> `MOCK_SALESFORCE_XLSM_OPPORTUNITIES`
+- `raw.mock_adobe_events` -> `MOCK_ADOBE_XLSM_EVENTS`
+- `raw.mock_adobe_campaigns` -> `MOCK_ADOBE_XLSM_CAMPAIGNS`
+
+Legacy non-XLSM tables are stale and excluded; there is no union or fallback.
+Models, unit fixtures and source-key coverage tests continue using the same
+logical `source('raw', ...)` references. Column and metadata compatibility with
+the existing transformations is expected, but has not been checked live for
+the XLSM tables.
+
+Freshness and row counts must be measured on these seven physical XLSM tables
+during an authorized warehouse validation. Check each table's row count and
+latest `_fivetran_synced`, required columns and service-role SELECT grants before
+an end-to-end run. RAW counts can exceed staging counts because staging
+deduplicates by business key; the existing source-key coverage test checks key
+preservation rather than equality of row counts. A nonempty table alone does
+not establish freshness, and a recent sync timestamp does not establish source
+completeness. No current counts, baselines or freshness results were measured
+by the credential-free parse. Freshness thresholds remain unset until the
+ingestion cadence and SLA are agreed; parsing does not perform freshness checks.
+
+The Airflow DAG's separate `RAW_TABLES` validation list expects the same seven
+physical XLSM tables. Its preflight requires each to exist and contain data;
+legacy non-XLSM tables are not required and cannot substitute for missing XLSM
+tables. The preflight does not measure freshness or reconcile row counts.
+
 The six new models retain one row per trimmed source ID. Salesforce accounts
 are keyed by `account_id`, never email; opportunities are keyed by
 `opportunity_id`, never account or amount. Blank identifiers become null and
@@ -76,17 +110,29 @@ executing these tests. Snowflake execution is required to verify the model's
 casting, ordering and unit-test results on the actual adapter; an offline parse
 does not establish that the unit tests pass.
 
-Three intentional missing-parent relationships remain visible as warnings:
+The three documented missing-parent relationships use warning severity:
 opportunity `OP_2002` references absent account `SF_1002`; subscription
 `SUB_7003` and payment `PAY_8003` reference absent customer `ST_9003`.
-Only these three relationship test definitions use warning severity; they
-still report every missing parent, without an ID allowlist. Other staging
-tests, including the payment-to-subscription relationship, remain errors.
+These are historical observations; the current XLSM orphan counts have not been
+queried. The same tests will report any missing parents in the active sources.
+The payment-to-subscription relationship also uses warning severity: a non-null
+subscription ID without a staged subscription must not block the exception
+snapshot from rebuilding. These four relationship definitions still report every
+missing parent, without an ID allowlist. Three specific date `not_null`
+definitions also use warnings:
+Adobe events `event_timestamp`, Stripe customers `created_at`, and Salesforce
+accounts `updated_at`. Their null parsed dates produce `missing_event_timestamp`,
+`missing_created_at`, and `missing_updated_at` rows in the existing exception
+table. No date is fabricated or replaced with ingestion time. Other staging
+tests, including account `created_at`, remain errors.
 
-RAW data and the orphan-handling policy are unchanged. Silver intermediate models
+RAW data and Gold missing-parent exclusions are unchanged. Silver intermediate models
 retain all staged facts and attach explicit orphan flags. The exception snapshot
-records affected facts, and trusted Gold fact models exclude them with
-error-level integrity and reconciliation tests. See
+records every applicable reason separately, including missing dates on parents
+and events. A missing customer creation date does not make payments or
+subscriptions orphaned. The current Gold facts exclude relationship orphans;
+date-only records remain eligible for metrics not requiring their missing date.
+Gold integrity and reconciliation tests remain errors. See
 [orphan handling](../intermediate/README.md) for the policy and build commands.
 
 Expected views under `CUSTOMER360_TEST.SILVER`:

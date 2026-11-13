@@ -1,4 +1,4 @@
-"""Monitor existing Fivetran ingestion, validate RAW, and build trusted dbt layers.
+"""Trigger and await existing Fivetran ingestion, validate RAW, and build trusted dbt layers.
 
 No network, secrets lookup, or dbt subprocess runs during DAG parsing.
 Runtime configuration and the current-state rerun contract are in airflow/README.md.
@@ -19,8 +19,10 @@ from html import escape
 from pathlib import Path
 
 from airflow.exceptions import AirflowException
-from airflow.sdk import Connection, PokeReturnValue, dag, get_current_context, task
-from airflow.sdk.exceptions import AirflowFailException
+from airflow.sdk import Connection, dag, task
+from airflow.sdk.exceptions import AirflowFailException, TaskDeferred
+from airflow.sdk.log import mask_secret
+from fivetran_provider_async.operators import FivetranOperator
 
 LOG = logging.getLogger(__name__)
 DATABASE = "CUSTOMER360_TEST"
@@ -28,19 +30,23 @@ RAW_SCHEMA = "RAW"
 FIVETRAN_CONN_ID = "customer360_fivetran"
 SNOWFLAKE_CONN_ID = "customer360_snowflake_raw"
 RAW_TABLES = (
-    "MOCK_SALESFORCE_ACCOUNTS",
-    "MOCK_SALESFORCE_OPPORTUNITIES",
-    "MOCK_ADOBE_EVENTS",
-    "MOCK_ADOBE_CAMPAIGNS",
-    "MOCK_STRIPE_CUSTOMERS",
-    "MOCK_STRIPE_SUBSCRIPTIONS",
-    "MOCK_STRIPE_PAYMENTS",
+    "MOCK_SALESFORCE_XLSM_ACCOUNTS",
+    "MOCK_SALESFORCE_XLSM_OPPORTUNITIES",
+    "MOCK_ADOBE_XLSM_EVENTS",
+    "MOCK_ADOBE_XLSM_CAMPAIGNS",
+    "MOCK_STRIPE_XLSM_CUSTOMERS",
+    "MOCK_STRIPE_XLSM_SUBSCRIPTIONS",
+    "MOCK_STRIPE_XLSM_PAYMENTS",
 )
 EXPECTED_WARNINGS = frozenset(
     {
         "relationships_stg_salesforce__opportunities_account_id__account_id__ref_stg_salesforce__accounts_",
         "relationships_stg_stripe__subscriptions_customer_id__customer_id__ref_stg_stripe__customers_",
         "relationships_stg_stripe__payments_customer_id__customer_id__ref_stg_stripe__customers_",
+        "relationships_stg_stripe__payments_subscription_id__subscription_id__ref_stg_stripe__subscriptions_",
+        "not_null_stg_adobe__events_event_timestamp",
+        "not_null_stg_stripe__customers_created_at",
+        "not_null_stg_salesforce__accounts_updated_at",
     }
 )
 ADMIN_ROLES = {
@@ -89,6 +95,8 @@ def failure_notification(context):
             "Failure email not configured; set CUSTOMER360_ALERT_EMAILS and customer360_smtp"
         )
         return
+    for recipient in recipients:
+        mask_secret(recipient)
     try:
         from airflow.providers.smtp.hooks.smtp import SmtpHook
 
@@ -104,28 +112,20 @@ def failure_notification(context):
         )
 
 
-def _timestamp(value):
-    if value is None:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            raise ValueError
-        return parsed.astimezone(UTC)
-    except (TypeError, ValueError):
-        raise AirflowFailException(
-            "Invalid timezone-aware Fivetran/run timestamp"
-        ) from None
-
-
 def _connection():
     try:
         connection = Connection.get(FIVETRAN_CONN_ID)
-        extra = connection.extra_dejson
-        ids = extra["connection_ids"]
-        destination_id = extra["destination_id"]
+        connector_id = os.environ.get("CUSTOMER360_FIVETRAN_CONNECTOR_ID", "").strip()
+        destination_id = os.environ.get(
+            "CUSTOMER360_FIVETRAN_DESTINATION_ID", ""
+        ).strip()
+        ids = [connector_id]
+        if connector_id:
+            mask_secret(connector_id)
         if not connection.login or not connection.password:
             raise ValueError
+        mask_secret(connection.login)
+        mask_secret(connection.password)
         if not isinstance(ids, list) or not ids or len(ids) != len(set(ids)):
             raise ValueError
         if any(
@@ -136,7 +136,7 @@ def _connection():
         return connection, ids, destination_id
     except Exception:  # noqa: BLE001 -- Secret-backend errors must not expose connection details.
         raise AirflowFailException(
-            "Configure customer360_fivetran credentials, connection_ids and destination_id"
+            "Configure customer360_fivetran credentials and CUSTOMER360_FIVETRAN_CONNECTOR_ID / CUSTOMER360_FIVETRAN_DESTINATION_ID"
         ) from None
 
 
@@ -157,21 +157,96 @@ def _fivetran_get(resource, identifier):
         raise AirflowException(
             "Fivetran request failed; Airflow will retry without logging credentials"
         ) from None
+    log_identifier = identifier if resource == "destinations" else "[redacted]"
+    LOG.info(
+        "Fivetran API response resource=%s identifier=%s http_status=%s",
+        resource,
+        log_identifier,
+        response.status_code,
+    )
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        payload = None
+    api_code = payload.get("code") if isinstance(payload, dict) else None
+    api_message = payload.get("message") if isinstance(payload, dict) else None
+    safe_code = _safe_api_text(api_code)
+    safe_message = _safe_api_text(api_message)
     if response.status_code in {401, 403, 404}:
+        LOG.warning(
+            "Fivetran API configuration/access error resource=%s identifier=%s "
+            "http_status=%s api_code=%s api_message=%s",
+            resource,
+            log_identifier,
+            response.status_code,
+            safe_code,
+            safe_message,
+        )
         raise AirflowFailException(
             f"Fivetran configuration/access error: HTTP {response.status_code}"
         )
     if response.status_code != 200:
+        LOG.warning(
+            "Fivetran API error resource=%s identifier=%s http_status=%s "
+            "api_code=%s api_message=%s",
+            resource,
+            log_identifier,
+            response.status_code,
+            safe_code,
+            safe_message,
+        )
         raise AirflowException(
             f"Fivetran request unsuccessful: HTTP {response.status_code}"
         )
-    try:
-        payload = response.json()
-        if payload["code"] != "Success" or not isinstance(payload["data"], dict):
-            raise ValueError
-        return payload["data"]
-    except (KeyError, TypeError, ValueError):
+    if (
+        not isinstance(payload, dict)
+        or payload.get("code") != "Success"
+        or not isinstance(payload.get("data"), dict)
+    ):
+        LOG.warning(
+            "Unexpected Fivetran API response resource=%s identifier=%s "
+            "http_status=%s api_code=%s api_message=%s",
+            resource,
+            log_identifier,
+            response.status_code,
+            safe_code,
+            safe_message,
+        )
         raise AirflowException("Fivetran returned an invalid status response") from None
+    data = payload["data"]
+    if resource == "destinations":
+        setup_tests = data.get("setup_tests")
+        test_statuses = (
+            [test.get("status") for test in setup_tests if isinstance(test, dict)]
+            if isinstance(setup_tests, list)
+            else []
+        )
+        LOG.info(
+            "Fivetran destination status destination_id=%s setup_status=%s "
+            "setup_test_statuses=%s",
+            identifier,
+            _safe_api_text(data.get("setup_status")),
+            [_safe_api_text(status) for status in test_statuses],
+        )
+    return data
+
+
+def _safe_api_text(value):
+    """Bound diagnostic fields and remove control characters; never log payloads."""
+    if not isinstance(value, str) or not value:
+        return "[unavailable]"
+    return re.sub(r"[\x00-\x1f\x7f]", " ", value).strip()[:200]
+
+
+def _safe_timestamp(value):
+    """Log only parsed, timezone-aware timestamps, never arbitrary payload text."""
+    if not isinstance(value, str):
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return timestamp.astimezone(UTC).isoformat() if timestamp.tzinfo else None
+    except (ValueError, OverflowError):
+        return None
 
 
 def _verified_status(connection_id, destination_id):
@@ -190,7 +265,8 @@ def _verified_status(connection_id, destination_id):
         raise AirflowFailException(
             "Fivetran destination must match the configured CUSTOMER360_TEST.RAW destination"
         )
-    if destination.get("setup_status") != "CONNECTED":
+    setup_status = destination.get("setup_status")
+    if not isinstance(setup_status, str) or setup_status.strip().upper() != "CONNECTED":
         raise AirflowFailException("Fivetran destination is not connected")
     if (
         details.get("paused")
@@ -202,35 +278,95 @@ def _verified_status(connection_id, destination_id):
     return details
 
 
-def _sync_finished(details, not_before):
-    """Never accept an old success, a later failure, or a still-running sync."""
-    status = details.get("status", {})
-    state = status.get("sync_state")
-    if state not in {"scheduled", "syncing", "rescheduled"}:
-        raise AirflowFailException(
-            "Unexpected Fivetran sync state; resolve connection configuration"
+class GuardedFivetranOperator(FivetranOperator):
+    """Recheck destination on every trigger attempt; provider owns sync and deferral."""
+
+    def execute(self, context):
+        _, ids, destination_id = _connection()
+        if self.connector_id not in ids:
+            raise AirflowFailException(
+                "Fivetran connector is not configured for this project"
+            )
+        details = _verified_status(self.connector_id, destination_id)
+        # Preserve the existing ingestion schedule; do not silently change it to manual.
+        self.schedule_type = details.get("schedule_type")
+        if self.schedule_type not in {"auto", "manual"}:
+            raise AirflowFailException("Fivetran schedule type is invalid")
+        LOG.info(
+            "Triggering configured Fivetran connector with asynchronous completion"
         )
-    succeeded = _timestamp(details.get("succeeded_at"))
-    failed = _timestamp(details.get("failed_at"))
-    boundary = _timestamp(not_before)
-    LOG.info(
-        "Fivetran connection=%s state=%s succeeded_at=%s failed_at=%s warning_count=%s",
-        details["id"],
-        state,
-        succeeded,
-        failed,
-        len(status.get("warnings") or []),
-    )
-    if failed and failed >= boundary and (succeeded is None or failed >= succeeded):
-        raise AirflowException(
-            "Fivetran reported a new sync failure; RAW validation remains blocked"
+        try:
+            super().execute(context)
+        except TaskDeferred as deferred:
+            # Persist the provider's pre-sync watermark across operator reconstruction.
+            deferred.kwargs = {
+                **(deferred.kwargs or {}),
+                "completion_after": self._completion_after,
+            }
+            raise
+        # Immediate provider completion returns None; always publish a mapped result.
+        return self._verified_completion(self._completion_after)
+
+    def _sync(self, hook):
+        self._completion_after = super()._sync(hook)
+        LOG.info(
+            "Fivetran provider sync watermark completed_after=%s",
+            _safe_timestamp(self._completion_after),
         )
-    return bool(
-        state == "scheduled"
-        and succeeded
-        and succeeded >= boundary
-        and (failed is None or succeeded > failed)
-    )
+        return self._completion_after
+
+    def _verified_completion(self, completion_after, reported_completion=None):
+        baseline = _safe_timestamp(completion_after)
+        if baseline is None:
+            raise AirflowException(
+                "Fivetran sync watermark is missing; RAW validation remains blocked"
+            )
+        _, ids, destination_id = _connection()
+        if self.connector_id not in ids:
+            raise AirflowFailException(
+                "Fivetran connector is not configured for this project"
+            )
+        details = _verified_status(self.connector_id, destination_id)
+        succeeded = _safe_timestamp(details.get("succeeded_at"))
+        failed = _safe_timestamp(details.get("failed_at"))
+        if (
+            details.get("status", {}).get("sync_state") != "scheduled"
+            or succeeded is None
+            or datetime.fromisoformat(succeeded) <= datetime.fromisoformat(baseline)
+            or (
+                failed is not None
+                and datetime.fromisoformat(failed) >= datetime.fromisoformat(succeeded)
+            )
+            or (details.get("failed_at") is not None and failed is None)
+            or (
+                reported_completion is not None
+                and datetime.fromisoformat(succeeded)
+                < datetime.fromisoformat(reported_completion)
+            )
+        ):
+            raise AirflowException(
+                "Fivetran sync completion is not verified as a new idle success; RAW validation remains blocked; Airflow will retry"
+            )
+        LOG.info(
+            "Configured Fivetran connector completed successfully; "
+            "completed_after=%s completed_at=%s sync_state=scheduled",
+            baseline,
+            succeeded,
+        )
+        return {"connector_id": self.connector_id, "status": "success"}
+
+    def execute_complete(self, context, event=None, completion_after=None):
+        # Provider 2.4.0 accepts missing events; fail closed and omit API error bodies.
+        if not event or event.get("status") != "success":
+            raise AirflowException(
+                "Fivetran sync failed; RAW validation remains blocked"
+            )
+        reported = _safe_timestamp(event.get("return_value"))
+        if reported is None:
+            raise AirflowException(
+                "Fivetran completion timestamp is missing; RAW validation remains blocked"
+            )
+        return self._verified_completion(completion_after, reported)
 
 
 def _snowflake_policy(layer):
@@ -398,7 +534,7 @@ def _validate_manifest(manifest):
             and node["name"] not in EXPECTED_WARNINGS
         ):
             raise AirflowFailException(
-                "Only the three documented staging relationships may have warning severity"
+                "Only the seven approved staging relationship and missing-date tests may have warning severity"
             )
     return set(models)
 
@@ -428,13 +564,34 @@ def _summarize_dbt(manifest, results, returncode):
             else:
                 warnings.append(node["name"])
                 LOG.warning(
-                    "Expected orphan warning: %s; facts retained in Silver and excluded from Gold",
+                    "Approved data-quality warning: %s; records retained in Silver; Gold applies reason-specific eligibility",
                     node["name"],
                 )
         elif status not in {"pass", "success"}:
             blocked = True  # Includes fail, error, skipped and partial success.
         if uid in model_ids:
             counts["models"] += 1
+            execution = next(
+                (
+                    item for item in result.get("timing", [])
+                    if item.get("name") == "execute"
+                ),
+                {},
+            )
+            affected = result.get("adapter_response", {}).get("rows_affected")
+            LOG.info(
+                "dbt model refresh node=%s relation=%s.%s.%s rows_affected=%s "
+                "execute_started_at=%s execute_completed_at=%s",
+                uid,
+                node["database"],
+                node["schema"],
+                node.get("alias", node["name"]),
+                affected
+                if isinstance(affected, int) and not isinstance(affected, bool)
+                else None,
+                _safe_timestamp(execution.get("started_at")),
+                _safe_timestamp(execution.get("completed_at")),
+            )
         else:
             counts["tests"] += 1
     required = (
@@ -459,6 +616,13 @@ def _summarize_dbt(manifest, results, returncode):
 
 
 def _run_dbt_command(command, project, environment, timeout=2700):
+    # The caller supplies CLI arguments only, never authentication parameters.
+    # Do not log environment values, profile contents or subprocess output.
+    LOG.info(
+        "dbt execution command=%s project_dir=%s profile=customer360 target=dev",
+        json.dumps(command),
+        project,
+    )
     # Linux worker: own process group lets timeout/cancellation terminate dbt children too.
     process = subprocess.Popen(
         command,
@@ -601,7 +765,7 @@ def _validate_dbt_profile(path):
 
 @dag(
     dag_id="customer360_pipeline",
-    description="Monitor Fivetran, validate TEST RAW, build and test dbt Silver/intermediate/Gold",
+    description="Trigger Fivetran, validate TEST RAW, build and test dbt Silver/intermediate/Gold",
     schedule=SCHEDULE,
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
     catchup=False,
@@ -622,56 +786,13 @@ def _validate_dbt_profile(path):
 )
 def customer360_pipeline():
     @task(multiple_outputs=False)
-    def prepare_sync_monitoring():
+    def prepare_fivetran_sync():
         if not _alert_recipients():
             raise AirflowFailException(
                 "Configure CUSTOMER360_ALERT_EMAILS and customer360_smtp before running the pipeline"
             )
-        _, connection_ids, destination_id = _connection()
-        context = get_current_context()
-        run_start = _timestamp(context["dag_run"].start_date)
-        interval_end = _timestamp(context.get("data_interval_end"))
-        # A cleared/retried run keeps its boundary. No historical replay of mutable Drive workbooks.
-        not_before = max(
-            x for x in (run_start, interval_end) if x is not None
-        ).isoformat()
-        snapshots = []
-        for connection_id in connection_ids:
-            _verified_status(connection_id, destination_id)
-            snapshots.append(
-                {
-                    "connection_id": connection_id,
-                    "destination_id": destination_id,
-                    "not_before": not_before,
-                }
-            )
-        LOG.info(
-            "Monitoring %s Fivetran connections; require successful completion at/after %s",
-            len(snapshots),
-            not_before,
-        )
-        return snapshots
-
-    @task.sensor(
-        poke_interval=60,
-        timeout=7200,
-        mode="reschedule",
-        execution_timeout=timedelta(minutes=2),
-    )
-    def wait_for_fivetran(snapshot):
-        details = _verified_status(
-            snapshot["connection_id"], snapshot["destination_id"]
-        )
-        complete = _sync_finished(details, snapshot["not_before"])
-        return PokeReturnValue(
-            is_done=complete,
-            xcom_value={
-                "connection_id": snapshot["connection_id"],
-                "succeeded_at": details.get("succeeded_at"),
-            }
-            if complete
-            else None,
-        )
+        _, connection_ids, _ = _connection()
+        return connection_ids
 
     @task(multiple_outputs=False)
     def validate_raw(sync_results):
@@ -724,7 +845,18 @@ def customer360_pipeline():
                 "dbt execution/artifact validation failed; verify executable, mounts and runtime credentials"
             ) from None
 
-    monitored = wait_for_fivetran.expand(snapshot=prepare_sync_monitoring())
+    monitored = (
+        GuardedFivetranOperator.partial(
+            task_id="sync_fivetran",
+            fivetran_conn_id=FIVETRAN_CONN_ID,
+            deferrable=True,
+            wait_for_completion=True,
+            poll_frequency=60,
+            execution_timeout=timedelta(hours=2),
+        )
+        .expand(connector_id=prepare_fivetran_sync())
+        .output
+    )
     run_dbt(validate_raw(monitored))
 
 

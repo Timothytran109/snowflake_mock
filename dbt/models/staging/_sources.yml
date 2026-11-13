@@ -3,34 +3,37 @@ version: 2
 sources:
   - name: raw
     description: >-
-      Source-aligned Fivetran mock exports in the development database. All seven
-      tables have _line and _fivetran_synced; none has _fivetran_deleted.
+      Active XLSM workbook exports loaded by Fivetran into the development
+      database. Logical source names map explicitly to the XLSM RAW tables;
+      legacy non-XLSM tables are not read. The expected source contract includes
+      _line and _fivetran_synced, without _fivetran_deleted. Freshness and row counts
+      on these physical tables require separate authorized warehouse validation.
     database: CUSTOMER360_TEST
     schema: RAW
 
     tables:
       - name: mock_stripe_payments
-        identifier: MOCK_STRIPE_PAYMENTS
+        identifier: MOCK_STRIPE_XLSM_PAYMENTS
         description: >-
           Stripe payment export; payment_id is the business key. Available ordering
           metadata is _fivetran_synced and _line. The line number is a file/sheet
           position, not a globally unique row identifier. No file/sheet identifier
           or unique ingestion row ID is guaranteed by this source contract.
       - name: mock_stripe_customers
-        identifier: MOCK_STRIPE_CUSTOMERS
+        identifier: MOCK_STRIPE_XLSM_CUSTOMERS
         description: Stripe customer export; customer_id is the business key.
       - name: mock_stripe_subscriptions
-        identifier: MOCK_STRIPE_SUBSCRIPTIONS
+        identifier: MOCK_STRIPE_XLSM_SUBSCRIPTIONS
         description: Stripe subscription export; subscription_id is the business key.
       - name: mock_salesforce_accounts
-        identifier: MOCK_SALESFORCE_ACCOUNTS
+        identifier: MOCK_SALESFORCE_XLSM_ACCOUNTS
         description: Salesforce account export; account_id, not email, identifies accounts.
       - name: mock_salesforce_opportunities
-        identifier: MOCK_SALESFORCE_OPPORTUNITIES
+        identifier: MOCK_SALESFORCE_XLSM_OPPORTUNITIES
         description: Salesforce opportunity export with text amounts and mixed date formats.
       - name: mock_adobe_events
-        identifier: MOCK_ADOBE_EVENTS
+        identifier: MOCK_ADOBE_XLSM_EVENTS
         description: Adobe event export; event_id identifies an individual event.
       - name: mock_adobe_campaigns
-        identifier: MOCK_ADOBE_CAMPAIGNS
+        identifier: MOCK_ADOBE_XLSM_CAMPAIGNS
         description: Adobe campaign export; campaign_id is the business key.

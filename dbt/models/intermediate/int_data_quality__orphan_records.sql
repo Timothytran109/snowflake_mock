@@ -1,4 +1,5 @@
--- Current-state exception snapshot, one row per source system/type/business key.
+-- Current-state data-quality snapshot; the historical table name is retained.
+-- Grain: source system / record type / business key / exception reason.
 -- This timestamp is the evaluation time, not historical first detection.
 with exceptions as (
     select
@@ -27,19 +28,80 @@ with exceptions as (
         'stripe' as source_system,
         'payment' as record_type,
         payment_id as record_id,
-        case when is_customer_orphan then customer_id else subscription_id end as parent_key,
-        case
-            when is_customer_orphan then 'missing_customer'
-            when is_subscription_missing then 'missing_subscription'
-            when is_subscription_orphan then 'orphaned_subscription'
-            when is_subscription_customer_mismatch then 'subscription_customer_mismatch'
-        end as exception_reason
+        customer_id as parent_key,
+        'missing_customer' as exception_reason
     from {{ ref('int_stripe__payments') }}
-    where is_orphan
+    where is_orphan and is_customer_orphan
+
+    union all
+
+    select
+        'stripe' as source_system,
+        'payment' as record_type,
+        payment_id as record_id,
+        subscription_id as parent_key,
+        'missing_subscription' as exception_reason
+    from {{ ref('int_stripe__payments') }}
+    where is_orphan and is_subscription_missing
+
+    union all
+
+    select
+        'stripe' as source_system,
+        'payment' as record_type,
+        payment_id as record_id,
+        subscription_id as parent_key,
+        'orphaned_subscription' as exception_reason
+    from {{ ref('int_stripe__payments') }}
+    where is_orphan and is_subscription_orphan
+
+    union all
+
+    select
+        'stripe' as source_system,
+        'payment' as record_type,
+        payment_id as record_id,
+        subscription_id as parent_key,
+        'subscription_customer_mismatch' as exception_reason
+    from {{ ref('int_stripe__payments') }}
+    where is_orphan and is_subscription_customer_mismatch
+
+    union all
+
+    select
+        'adobe' as source_system,
+        'event' as record_type,
+        event_id as record_id,
+        cast(null as varchar) as parent_key,
+        'missing_event_timestamp' as exception_reason
+    from {{ ref('stg_adobe__events') }}
+    where event_timestamp is null
+
+    union all
+
+    select
+        'stripe' as source_system,
+        'customer' as record_type,
+        customer_id as record_id,
+        cast(null as varchar) as parent_key,
+        'missing_created_at' as exception_reason
+    from {{ ref('stg_stripe__customers') }}
+    where created_at is null
+
+    union all
+
+    select
+        'salesforce' as source_system,
+        'account' as record_type,
+        account_id as record_id,
+        cast(null as varchar) as parent_key,
+        'missing_updated_at' as exception_reason
+    from {{ ref('stg_salesforce__accounts') }}
+    where updated_at is null
 )
 
 select
-    sha2(to_json(array_construct(source_system, record_type, record_id)), 256) as exception_id,
+    sha2(to_json(array_construct(source_system, record_type, record_id, exception_reason)), 256) as exception_id,
     source_system,
     record_type,
     record_id,

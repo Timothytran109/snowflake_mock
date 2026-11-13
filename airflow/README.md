@@ -4,7 +4,7 @@
 
 ```text
 Google Drive workbooks -> existing Fivetran connections -> Snowflake RAW
-prepare_sync_monitoring -> wait_for_fivetran [mapped per connection]
+prepare_fivetran_sync -> sync_fivetran [mapped per connection]
                        -> validate_raw -> run_dbt
                                            staging -> intermediate -> marts
 ```
@@ -17,29 +17,55 @@ schedule in another system before enabling this DAG.
 
 ## Ingestion and freshness contract
 
-This first DAG **monitors existing Fivetran connections** using read-only REST API
-requests. It does not force syncs, change ingestion schedules, or write to RAW.
-Fivetran continues to own ingestion from Google Drive. Configure every connection
-needed to populate the seven tables below, including separate workbook connections.
+The DAG uses `airflow-provider-fivetran-async==2.4.0` and its
+`FivetranOperator(deferrable=True, wait_for_completion=True)`. A small subclass
+rechecks each connector's TEST destination, RAW schema, setup and paused state on
+every attempt, then delegates triggering and asynchronous waiting to the provider.
+The existing triggerer polls every 60 seconds; the task has a two-hour execution
+and deferral timeout. RAW validation requires every mapped sync to succeed.
+Missing or error completion events fail closed. No live sync is part of validation.
 
-Before monitoring, the DAG checks each connection's destination ID, Snowflake
-database (`CUSTOMER360_TEST`), RAW schema, setup state and paused state. It accepts
-only a successful sync completed at or after the later of the DAG run's start time
-and data interval end. A previous success, a still-running sync, or a later failed
-sync cannot release RAW validation. Sensors poll every minute in reschedule mode,
-freeing worker slots between checks, with a two-hour total timeout.
+The guarded operator persists the provider's pre-sync completion watermark in
+Airflow's deferred callback kwargs. Before releasing RAW, both immediate and
+asynchronous completion recheck the destination, require an idle `scheduled`
+connector with a strictly newer successful timestamp, reject a newer failure,
+and reconcile any reported completion time with current API metadata. Provider
+2.4.0's async path alone can report success while the connector is still syncing;
+an unverified result now fails closed and uses the existing retry policy, which
+can issue another force request. No additional scheduler or polling task is added.
 
-Fivetran therefore needs an enabled ingestion schedule that completes a fresh sync
-within that window, or an operator must initiate a sync in Fivetran after starting
-the DAG. A previously completed sync alone will not satisfy a new manual run.
-The API identity needs read access to connection and destination details only.
-No direct Google Drive credentials are needed by Airflow.
+The API identity needs permission to read connector/destination metadata and force
+syncs. Configure every connector needed to populate the seven RAW tables. The
+operator preserves each connector's existing manual/automatic schedule. Fivetran
+owns ingestion; no direct Google Drive credentials are needed by Airflow.
 
-The monitoring boundary is stable across task retries within a run. Reruns rebuild
-the current source state: mutable workbooks and RAW do not provide historical
-snapshots. Do not use this DAG to claim historical point-in-time backfills. Sync
-completion and RAW checks are not a cross-connection transactional snapshot; an
-independent later ingestion can still update RAW during a build.
+Airflow retries twice with exponential delays starting at five minutes. Retrying
+or clearing the sync task can issue another force request; the provider does not
+guarantee exactly-once ingestion. Each attempt rechecks destination safety. A dbt
+retry does not rerun successful upstream tasks. Reruns build current source state,
+not historical snapshots of mutable workbooks. Independently scheduled ingestion
+can still update RAW during a build; completion is not a transactional snapshot.
+
+A full run automatically executes `dbt build --select staging intermediate marts
+--threads 1`, including the exception snapshot and Gold. A separate manual dbt
+command is not part of the workflow. Save/export and upload workbook changes
+before requesting the run; ingestion cannot include changes that arrive after
+the connector has read its source. Staging views reflect later RAW changes
+immediately, while intermediate/exception/Gold tables reflect their last build.
+A payment appearing in a staging view alone does not establish when it arrived
+or whether it was available during that build.
+
+Connector and destination IDs are resolved at task execution from
+`CUSTOMER360_FIVETRAN_CONNECTOR_ID` and `CUSTOMER360_FIVETRAN_DESTINATION_ID`.
+Recipients come from `CUSTOMER360_ALERT_EMAILS` in the ignored repository-root
+`.env`, through Compose interpolation. This is the authoritative alert configuration
+path; do not configure recipients in `runtime.env`. An explicit nonempty shell
+override follows normal Compose precedence; an empty shell override or a missing
+root value fails Compose validation rather than clearing recipients. Compose passes
+the resolved values into all Airflow services. Connection extras are not required.
+Missing configuration blocks ingestion. After changing
+runtime environment values, recreate services with `docker compose up -d` when
+ready; mocked validation does not recreate services or trigger the DAG.
 
 ## Local Docker Desktop environment
 
@@ -59,9 +85,11 @@ Services:
 - `airflow-api-server`: UI/API on **http://localhost:8081**, bound only to `127.0.0.1`, with an HTTP health check.
 - `airflow-scheduler`: LocalExecutor scheduler/task runner, started after initialization and API health, with scheduler heartbeat health checks.
 - `airflow-dag-processor`: separate Airflow 3 parser process with a DagProcessorJob health check.
+- `airflow-triggerer`: runs `airflow triggerer` for deferrable operators using the shared image, environment, DAG and secret mounts, with a TriggererJob health check.
 
 Airflow services run as UID 50000, not root. LocalExecutor needs neither Redis nor
-a Celery worker. The current reschedule sensors do not require a triggerer.
+a Celery worker. The triggerer is an Airflow process, not a separate pip package;
+`airflow-provider-fivetran-async==2.4.0` remains installed for async integration.
 The SimpleAuthManager is for local development only; this is not a production
 deployment. Do not expose its port publicly. The official Airflow documentation
 describes [SimpleAuthManager's development scope](https://airflow.apache.org/docs/apache-airflow/3.3.2/core-concepts/auth-manager/simple/index.html).
@@ -141,7 +169,6 @@ The Airflow services share these read-only bind mounts:
 - `dbt` -> `/opt/customer360/dbt`
 - `.local/customer360/dbt` (or `CUSTOMER360_DBT_PROFILES_HOST_DIR`) -> `/opt/airflow/secrets/dbt`
 - `.local/customer360/keys` (or `CUSTOMER360_KEYS_HOST_DIR`) -> `/opt/airflow/secrets/keys`
-
 - `keys/snowflake` -> `/opt/airflow/secrets/snowflake`
 
 The Snowflake key directory must exist before starting the containers. All Airflow
@@ -267,24 +294,16 @@ place live connection JSON or URIs in this repository or shell history.
 
 ### `customer360_fivetran`
 
-Use a generic connection: login is the Fivetran API key and password is its secret.
-The API host is fixed to `https://api.fivetran.com`; redirects are disabled.
-Configure the following non-secret extra fields, replacing the placeholders with
-the IDs of the existing TEST destination and connections:
-
-```json
-{
-  "destination_id": "existing_test_destination_id",
-  "connection_ids": ["existing_workbook_connection_id"]
-}
-```
-
-The list must be nonempty, unique, and cover all required workbooks. The destination
-ID is the Fivetran group ID. File connections may report their output as
-`raw.table_name`; that form is supported. Failed setup, paused connections, wrong
-destinations and authentication errors fail without retrying configuration errors.
-Transient HTTP failures use task retries. Response bodies and credentials are not
-logged or placed in XCom.
+Use the existing Fivetran connection: login is the API key and password is its secret.
+The read-only destination guard uses a fixed HTTPS origin with redirects disabled;
+the installed provider owns the trigger and asynchronous polling calls.
+Set `CUSTOMER360_FIVETRAN_CONNECTOR_ID` and
+`CUSTOMER360_FIVETRAN_DESTINATION_ID` in the ignored root `.env`; do not put IDs or
+credentials in Python. The destination ID is the Fivetran group ID. The existing
+Airflow connection supplies API authentication only. File connectors may report
+`raw.table_name`; that form is supported. Destination, setup and paused-state
+guards still apply before each trigger attempt. Task logs omit configured IDs;
+runtime values are registered with Airflow secret masking before provider calls.
 
 ### `customer360_snowflake_raw`
 
@@ -312,18 +331,24 @@ that secondary-role policy and verify it in an authorized live session.
 
 The role needs warehouse USAGE, database/schema USAGE and SELECT on these tables:
 
-- `CUSTOMER360_TEST.RAW.MOCK_SALESFORCE_ACCOUNTS`
-- `CUSTOMER360_TEST.RAW.MOCK_SALESFORCE_OPPORTUNITIES`
-- `CUSTOMER360_TEST.RAW.MOCK_ADOBE_EVENTS`
-- `CUSTOMER360_TEST.RAW.MOCK_ADOBE_CAMPAIGNS`
-- `CUSTOMER360_TEST.RAW.MOCK_STRIPE_CUSTOMERS`
-- `CUSTOMER360_TEST.RAW.MOCK_STRIPE_SUBSCRIPTIONS`
-- `CUSTOMER360_TEST.RAW.MOCK_STRIPE_PAYMENTS`
+- `CUSTOMER360_TEST.RAW.MOCK_SALESFORCE_XLSM_ACCOUNTS`
+- `CUSTOMER360_TEST.RAW.MOCK_SALESFORCE_XLSM_OPPORTUNITIES`
+- `CUSTOMER360_TEST.RAW.MOCK_ADOBE_XLSM_EVENTS`
+- `CUSTOMER360_TEST.RAW.MOCK_ADOBE_XLSM_CAMPAIGNS`
+- `CUSTOMER360_TEST.RAW.MOCK_STRIPE_XLSM_CUSTOMERS`
+- `CUSTOMER360_TEST.RAW.MOCK_STRIPE_XLSM_SUBSCRIPTIONS`
+- `CUSTOMER360_TEST.RAW.MOCK_STRIPE_XLSM_PAYMENTS`
 
-After all monitored syncs succeed, validation verifies the actual Snowflake session
+These are the active XLSM workbook tables, matching the explicit physical
+identifiers in `dbt/models/staging/_sources.yml`. Legacy non-XLSM tables are not
+required, queried or used as fallbacks. The dbt logical source names stay unchanged.
+
+After all provider sync tasks succeed, validation verifies the actual Snowflake session
 database, schema, service user and exact role. It checks table visibility through
 `information_schema.tables` and uses `select 1 ... limit 1` per table to verify
 nonempty data without logging business records. Missing or empty tables block dbt.
+This preflight does not measure freshness or reconcile row counts; see the
+[staging source documentation](../dbt/models/staging/README.md) for those checks.
 No grants or source modifications are performed by the DAG.
 
 ### dbt runtime profile
@@ -417,36 +442,77 @@ dbt models rebuild their current-state relations; the entire multi-model build i
 not an atomic publication. After a failure, downstream consumers must check the
 last successful DAG run and may still see relations from different build attempts.
 
-Only the three existing staging relationship test names in `EXPECTED_WARNINGS`
-are accepted as nonblocking data-quality warnings. The currently documented rows are:
+Only seven exact test names in `EXPECTED_WARNINGS` are accepted as nonblocking
+data-quality warnings: the three historical missing-parent staging relationships,
+the payment-to-subscription relationship
+`relationships_stg_stripe__payments_subscription_id__subscription_id__ref_stg_stripe__subscriptions_`, and these
+three staging date checks:
+
+- `not_null_stg_adobe__events_event_timestamp`
+- `not_null_stg_stripe__customers_created_at`
+- `not_null_stg_salesforce__accounts_updated_at`
+
+Historical missing-parent observations were:
 
 - Salesforce opportunity `OP_2002` references missing account `SF_1002`.
 - Stripe subscription `SUB_7003` references missing customer `ST_9003`.
 - Stripe payment `PAY_8003` references missing customer `ST_9003`.
 
-This is a test-name allowlist, not a hardcoded row-count exemption: future orphans
-in those relationships remain visible as warnings and in
+This is a test-name allowlist, not a hardcoded row-count exemption: affected rows
+in those relationships or date checks remain visible as warnings and in
 `SILVER.int_data_quality__orphan_records`. Operators should investigate changes in
-warning counts. Facts stay in Silver with the existing flags; trusted Gold excludes
-them. A restored parent can legitimately reduce the number of warnings to zero.
+warning counts. All records stay in Silver. Gold excludes relationship orphans;
+missing dates alone do not invalidate customers/accounts as parents or exclude
+facts from date-independent metrics. The exception table retains its historical
+name, but now records every applicable relationship or missing-date reason,
+with deterministic IDs including the reason. Exception row counts can exceed
+affected-record counts. A corrected date or restored parent can legitimately
+reduce warnings to zero after a complete rebuild. See the
+[exception policy](../dbt/models/intermediate/README.md).
 Gold integrity and reconciliation errors, skipped required nodes, nonzero dbt exit
 codes, incomplete/stale artifacts, and unexpected test warnings all block the DAG.
 The guard also rejects warning severity on any other data test, including Gold.
+Even an approved test name does not exempt an error, failure or skipped result.
 
-Logs contain Fivetran IDs/states/timestamps and warning counts, RAW table validation
-results, dbt node IDs/statuses/failing-row counts, and a build summary. Raw dbt
+The missing-subscription warning lets intermediate models and the exception
+snapshot rebuild in the same `staging intermediate marts` build. The payment
+stays in Silver, receives a `missing_subscription` exception, and stays out of
+Gold until a valid subscription for the same customer is restored and rebuilt.
+Gold relationship and reconciliation tests retain error severity.
+
+Logs contain Fivetran HTTP status, destination ID, bounded API error code/message,
+destination setup status and setup-test statuses. They never include the complete
+API response. Logs also contain connector trigger/completion status, RAW validation
+results, the exact dbt argument list/project directory and fixed profile/target,
+dbt node IDs/statuses/failing-row counts, and a build summary. For each model,
+safe logs include the target relation, numeric adapter `rows_affected` and
+execution timestamps; asynchronous sync completion also logs the provider's
+completion timestamp when valid. Adapter counts are not payment-level evidence:
+view DDL can report one affected row regardless of source cardinality. Raw dbt
 stdout/stderr and artifact error messages are deliberately not forwarded because
 they can contain credentials or data. Detailed temporary dbt logs are deleted on
 exit. If parsing, connection setup or SQL execution needs diagnosis beyond the
 safe statuses, use an authorized interactive dbt session with the same project and
 runtime profile; inspect its protected logs without publishing sensitive output.
 
+For a refresh discrepancy, compare one specific run's sync-completion timestamp,
+`run_dbt` execution timestamps and model statuses with the source change/arrival
+time. Confirm that intermediate, exceptions and Gold have successful results,
+and check the payment's relationship eligibility separately. A green DAG label
+alone is insufficient if retained task records/logs disagree. Compare the actual
+account, database, schema, role and user of local and container builds; matching
+profile names do not imply the same authenticated identity or row visibility.
+Do not change credentials or remove guards to reconcile a difference. Protected
+query history/source-arrival evidence may be needed to establish the historical
+cause; current mounted code cannot establish past source availability.
+
 ## Validation
 
 The tests use a real Airflow DagBag and serializer, and mock only external I/O.
 They cover imports without secret/network access, exact dependencies, operational
-defaults, sync freshness/failures, destination checks, RAW checks, dbt warning/error
-handling, routing guards, artifact isolation and process cleanup.
+defaults, provider triggering/deferral/timeouts/retries, destination response shapes,
+RAW checks, dbt warning/error handling, routing guards, artifact isolation and
+process cleanup.
 
 Run Ruff with this repository's `pyproject.toml` explicitly mounted. Otherwise the
 Airflow development image can discover its own parent configuration, producing
